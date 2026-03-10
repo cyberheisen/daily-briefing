@@ -2,21 +2,25 @@ name: Daily Briefing Generator
 
 on:
   schedule:
-    # 4:00 AM CST = 10:00 AM UTC (standard time)
-    # 4:00 AM CDT = 09:00 AM UTC (daylight saving time)
-    # Running at both to cover DST transitions
-    - cron: '0 9 * 3-11 *'   # 4am CDT (Mar-Nov)
-    - cron: '0 10 * 1-2,12 *' # 4am CST (Dec-Feb)
-  workflow_dispatch:          # Allow manual trigger from GitHub UI anytime
+    # Morning Edition — 4:00 AM CST/CDT
+    - cron: '0 9 * 3-11 *'    # 4am CDT (Mar–Nov, UTC-5 → UTC+0 = 9)
+    - cron: '0 10 * 1-2,12 *' # 4am CST (Dec–Feb, UTC-6 → UTC+0 = 10)
+    # Midday Edition — 12:00 PM CST/CDT
+    - cron: '0 17 * 3-11 *'   # noon CDT
+    - cron: '0 18 * 1-2,12 *' # noon CST
+    # Evening Edition — 6:00 PM CST/CDT
+    - cron: '0 23 * 3-11 *'   # 6pm CDT
+    - cron: '0 0 * 1-2,12 *'  # 6pm CST (midnight UTC next day)
+  workflow_dispatch:           # Manual trigger from Actions tab
 
 permissions:
-  contents: write             # Required to push the generated HTML to gh-pages
+  contents: write
 
 jobs:
   generate-briefing:
     runs-on: ubuntu-latest
     environment: production
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -27,17 +31,17 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install anthropic requests
+        run: pip install anthropic
 
       - name: Generate briefing
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: python generate_briefing.py
+        run: python scripts/generate_briefing.py
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./output
-          keep_files: true      # Keep previous days' briefings
-          destination_dir: .    # Publish to root of gh-pages branch
+          keep_files: true
+          destination_dir: .
