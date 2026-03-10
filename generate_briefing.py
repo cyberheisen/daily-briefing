@@ -2,6 +2,7 @@
 """
 Daily Briefing Generator
 Splits research into two API calls to stay under 30k token/min rate limit.
+Handles multi-turn tool use (web_search may require follow-up turns).
 Outputs to ./output/index.html and ./output/archive/YYYY-MM-DD.html
 """
 
@@ -23,6 +24,9 @@ def get_cst_date():
 # ── JSON extraction ────────────────────────────────────────────────────────────
 
 def extract_json(text):
+    """Extract JSON from text that may have preamble or fences."""
+    if not text or not text.strip():
+        raise ValueError("Empty response text — no JSON to extract")
     match = re.search(r'```(?:json)?\s*([\s\S]*?)```', text)
     if match:
         try:
@@ -40,7 +44,6 @@ def extract_json(text):
 # ── Retry helper ───────────────────────────────────────────────────────────────
 
 def with_retry(fn, max_retries=4, base_delay=65):
-    """Retry on 429 with exponential backoff."""
     for attempt in range(max_retries):
         try:
             return fn()
@@ -55,21 +58,94 @@ def with_retry(fn, max_retries=4, base_delay=65):
                 if attempt == max_retries - 1:
                     raise
                 delay = base_delay * (2 ** attempt)
-                print(f"    Overloaded. Waiting {delay}s (attempt {attempt+2}/{max_retries})...")
+                print(f"    Overloaded. Waiting {delay}s...")
                 time.sleep(delay)
             else:
                 raise
+
+# ── Agentic loop: handles multi-turn tool use ─────────────────────────────────
+
+def run_with_tools(client, prompt, tools, max_tokens=2000, max_turns=5):
+    """
+    Run a prompt that may require multiple tool-use turns.
+    Continues the conversation until the model returns stop_reason='end_turn'
+    with a text response (not just tool_use).
+    Returns the final text content.
+    """
+    messages = [{"role": "user", "content": prompt}]
+
+    for turn in range(max_turns):
+        response = with_retry(lambda: client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=max_tokens,
+            tools=tools,
+            messages=messages
+        ))
+
+        # Collect any text from this response
+        text_parts = []
+        tool_use_blocks = []
+        for block in response.content:
+            if block.type == "text":
+                text_parts.append(block.text)
+            elif block.type == "tool_use":
+                tool_use_blocks.append(block)
+
+        # If the model is done (end_turn) and has text, we're done
+        if response.stop_reason == "end_turn":
+            final_text = "".join(text_parts)
+            if final_text.strip():
+                return final_text
+            # end_turn but no text — shouldn't happen, but handle gracefully
+            raise ValueError(f"Model returned end_turn with no text on turn {turn+1}")
+
+        # Model wants to use tools (stop_reason == "tool_use")
+        # We need to append the assistant message and provide tool results
+        if response.stop_reason == "tool_use" and tool_use_blocks:
+            # Append assistant's response to conversation
+            messages.append({"role": "assistant", "content": response.content})
+
+            # Build tool results — for web_search the SDK handles execution,
+            # but the tool results come back in the response content as
+            # tool_result blocks automatically when using the hosted tool.
+            # We just need to continue the loop; the next call will have the results.
+            # Actually with Anthropic's hosted web_search, results are injected
+            # automatically — we only need to pass the full message history back.
+            # The tool_result blocks are already in response.content.
+            # So just loop and call again with the updated messages.
+            
+            # Check if tool results are already in response.content
+            tool_result_blocks = [b for b in response.content if hasattr(b, 'type') and b.type == "tool_result"]
+            
+            if tool_result_blocks:
+                # Results already present — just continue loop, model will synthesize
+                messages.append({"role": "assistant", "content": response.content})
+            else:
+                # No results yet — the model issued tool_use, we need to re-invoke
+                # with the conversation so far so it can see results on next turn
+                pass  # messages already has the assistant turn appended above
+            
+            continue
+
+        # Unexpected stop reason
+        final_text = "".join(text_parts)
+        if final_text.strip():
+            return final_text
+        raise ValueError(f"Unexpected stop_reason={response.stop_reason} with no text")
+
+    raise ValueError(f"Exceeded {max_turns} turns without a final text response")
 
 # ── Research: call A — World / National / Finance ─────────────────────────────
 
 def research_general(client, date_str):
     print("  [1a] Searching world, national, finance...")
+
     prompt = f"""Today is {date_str}. Search the web for today's top news.
 
 Find 3 stories each for: WORLD NEWS, US NATIONAL NEWS, FINANCE & MARKETS.
-Also get current stock values: DOW, S&P 500, NASDAQ, WTI crude oil price, national avg gas price.
+Also get current values: DOW, S&P 500, NASDAQ, WTI crude, national avg gas price.
 
-Return RAW JSON only. No markdown. No preamble. Start with {{
+CRITICAL: After searching, respond with RAW JSON only. No markdown. No preamble. Start with {{
 
 {{
   "market_snapshot": {{
@@ -80,31 +156,26 @@ Return RAW JSON only. No markdown. No preamble. Start with {{
     "gas_avg":{{"value": "$3.89",  "change": "+0.05"}}
   }},
   "breaking_alert": "",
-  "world":    [{{"headline":"...","summary":"...","source":"...","url":"...","severity":"critical|high|watch|normal"}}],
+  "world":    [{{"headline":"...","summary":"...","source":"...","url":"...","severity":"normal"}}],
   "national": [{{"headline":"...","summary":"...","source":"...","url":"...","severity":"normal"}}],
   "finance":  [{{"headline":"...","summary":"...","source":"...","url":"...","severity":"normal"}}]
 }}"""
 
-    msg = with_retry(lambda: client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=2000,
-        tools=[{"type": "web_search_20250305", "name": "web_search"}],
-        messages=[{"role": "user", "content": prompt}]
-    ))
-    text = "".join(b.text for b in msg.content if b.type == "text")
+    tools = [{"type": "web_search_20250305", "name": "web_search"}]
+    text = run_with_tools(client, prompt, tools, max_tokens=2500)
     return extract_json(text)
 
 # ── Research: call B — Cyber + Weather ────────────────────────────────────────
 
 def research_cyber_weather(client, date_str):
     print("  [1b] Searching cybersecurity + weather...")
+
     prompt = f"""Today is {date_str}. Search the web for two things:
 
-1. TOP 4 CYBERSECURITY stories: active threats, CVEs, CISA advisories, nation-state activity, ransomware, breaches. Include CVE numbers where relevant.
+1. TOP 4 CYBERSECURITY stories: active threats, CVEs, CISA advisories, nation-state activity, ransomware, breaches.
+2. WEATHER for Spring TX (zip 77379): today's high, low, condition, rain chance, wind, any NWS alerts.
 
-2. WEATHER for Spring TX (zip 77379): today's high, low, condition, rain chance %, wind, any NWS alerts.
-
-Return RAW JSON only. No markdown. No preamble. Start with {{
+CRITICAL: After searching, respond with RAW JSON only. No markdown. No preamble. Start with {{
 
 {{
   "weather": {{
@@ -116,13 +187,8 @@ Return RAW JSON only. No markdown. No preamble. Start with {{
   ]
 }}"""
 
-    msg = with_retry(lambda: client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=2000,
-        tools=[{"type": "web_search_20250305", "name": "web_search"}],
-        messages=[{"role": "user", "content": prompt}]
-    ))
-    text = "".join(b.text for b in msg.content if b.type == "text")
+    tools = [{"type": "web_search_20250305", "name": "web_search"}]
+    text = run_with_tools(client, prompt, tools, max_tokens=2500)
     return extract_json(text)
 
 # ── Merge results ──────────────────────────────────────────────────────────────
@@ -132,9 +198,8 @@ def research_news(client, date_str):
 
     general = research_general(client, date_str)
 
-    # Pause between calls to let the token-per-minute window reset partially
-    print("  Pausing 15s between API calls...")
-    time.sleep(15)
+    print("  Pausing 20s between API calls...")
+    time.sleep(20)
 
     cyber_wx = research_cyber_weather(client, date_str)
 
@@ -209,7 +274,6 @@ def save_output(html, date_slug):
     arc = out / "archive"
     out.mkdir(exist_ok=True)
     arc.mkdir(exist_ok=True)
-
     (out / "index.html").write_text(html, encoding="utf-8")
     (arc / f"{date_slug}.html").write_text(html, encoding="utf-8")
     write_archive_index(arc)
@@ -235,7 +299,7 @@ body{{background:#0d0f12;color:#d4d8df;font-family:'IBM Plex Sans',sans-serif;pa
 h1{{font-family:'IBM Plex Mono',monospace;color:#c8a96e;font-size:14px;letter-spacing:.2em;text-transform:uppercase;margin-bottom:30px}}
 ul{{list-style:none}}li{{padding:12px 0;border-bottom:1px solid #252a33}}
 a{{color:#4e9af1;text-decoration:none;font-family:'IBM Plex Mono',monospace;font-size:13px}}
-a:hover{{color:#c8a96e}}.back{{display:block;margin-bottom:30px;color:#636b78;font-size:11px}}
+a:hover{{color:#c8a96e}}.back{{display:block;margin-bottom:30px;color:#636b78;font-size:11px;text-decoration:none}}
 </style></head><body>
 <a href="../" class="back">← Back to today's briefing</a>
 <h1>// Briefing Archive</h1>
