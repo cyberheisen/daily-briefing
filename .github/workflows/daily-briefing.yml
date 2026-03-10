@@ -1,16 +1,16 @@
 name: Daily Briefing Generator
 
 on:
-  schedule:
+  #schedule:
     # Morning Edition — 4:00 AM CST/CDT
-    - cron: '0 9 * 3-11 *'    # 4am CDT (Mar–Nov, UTC-5 → UTC+0 = 9)
-    - cron: '0 10 * 1-2,12 *' # 4am CST (Dec–Feb, UTC-6 → UTC+0 = 10)
+    #- cron: '0 9 * 3-11 *'    # 4am CDT (Mar–Nov, UTC-5 → UTC+0 = 9)
+    #- cron: '0 10 * 1-2,12 *' # 4am CST (Dec–Feb, UTC-6 → UTC+0 = 10)
     # Midday Edition — 12:00 PM CST/CDT
-    - cron: '0 17 * 3-11 *'   # noon CDT
-    - cron: '0 18 * 1-2,12 *' # noon CST
+    #- cron: '0 17 * 3-11 *'   # noon CDT
+    #- cron: '0 18 * 1-2,12 *' # noon CST
     # Evening Edition — 6:00 PM CST/CDT
-    - cron: '0 23 * 3-11 *'   # 6pm CDT
-    - cron: '0 0 * 1-2,12 *'  # 6pm CST (midnight UTC next day)
+    #- cron: '0 23 * 3-11 *'   # 6pm CDT
+    #- cron: '0 0 * 1-2,12 *'  # 6pm CST (midnight UTC next day)
   workflow_dispatch:           # Manual trigger from Actions tab
 
 permissions:
