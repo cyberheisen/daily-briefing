@@ -88,34 +88,23 @@ def run_with_tools(client, prompt, tools, max_tokens=2500, max_turns=10):
 
         if response.stop_reason == "end_turn":
             final = "".join(text_parts)
+            print("    turn {} stop=end_turn text_len={} blocks={}".format(
+                turn + 1, len(final), [b.type for b in response.content]
+            ))
             if final.strip():
                 return final
             raise ValueError("end_turn with no text on turn {}".format(turn+1))
 
         if response.stop_reason == "tool_use":
-            # Append assistant turn
+            # For Anthropic hosted tools (web_search), the tool results are
+            # returned automatically in the *same* response as tool_result
+            # blocks alongside the tool_use blocks. We just append the full
+            # assistant message and call again -- no manual tool_result needed.
+            print("    turn {} stop=tool_use blocks={}".format(
+                turn + 1,
+                [b.type for b in response.content]
+            ))
             messages.append({"role": "assistant", "content": response.content})
-            # Build tool_result blocks for every tool_use block in this response
-            tool_results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    # The web_search tool result is already embedded in the response
-                    # by Anthropic's hosted tool infrastructure as tool_result blocks.
-                    # We just need to surface them. If the result content is on the
-                    # block itself use it; otherwise provide an empty placeholder so
-                    # the conversation can continue.
-                    result_content = getattr(block, "content", None) or ""
-                    if isinstance(result_content, list):
-                        result_content = " ".join(
-                            getattr(c, "text", str(c)) for c in result_content
-                        )
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": str(result_content),
-                    })
-            if tool_results:
-                messages.append({"role": "user", "content": tool_results})
             continue
 
         # Any other stop reason -- return text if we have it
