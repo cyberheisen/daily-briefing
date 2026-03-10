@@ -31,7 +31,7 @@ jobs:
       - name: Generate briefing
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: python scripts/generate_briefing.py
+        run: python generate_briefing.py
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
