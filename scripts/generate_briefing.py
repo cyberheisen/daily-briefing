@@ -75,119 +75,94 @@ def with_retry(fn, max_retries=4, base_delay=65):
                 raise
 
 # Step 1: search only -- let the model gather data freely
-def run_search(client, search_prompt, max_tokens=2000):
-    """Run web search and return raw text of all findings."""
+def run_search(client, search_prompt, max_tokens=1500):
+    """Run web search, return only the model's own summary text (not raw snippets)."""
     response = with_retry(lambda: client.messages.create(
         model=MODEL_RESEARCH,
         max_tokens=max_tokens,
         tools=[{"type": "web_search_20250305", "name": "web_search"}],
         messages=[{"role": "user", "content": search_prompt}]
     ))
-    # Collect all text blocks -- may be interspersed with tool blocks
-    all_text = []
+    # Only collect the model's own text blocks -- skip raw search result blocks
+    # to avoid passing huge amounts of snippet text to the format step
+    parts = []
     for block in response.content:
         if hasattr(block, "text") and block.text:
-            all_text.append(block.text)
-        # web_search_tool_result blocks contain the search snippets
-        elif block.type == "web_search_tool_result":
-            if hasattr(block, "content") and block.content:
-                for item in block.content:
-                    if hasattr(item, "text") and item.text:
-                        all_text.append(item.text)
-    return "\n\n".join(all_text)
+            parts.append(block.text)
+    return "\n\n".join(parts)
 
-# Step 2: format only -- no tools, JSON output only
-def run_format(client, format_prompt, max_tokens=2500):
-    """Convert raw research text into structured JSON."""
+def run_format(client, combined_raw, max_tokens=1800):
+    """Format combined raw research from both searches into a single JSON object."""
+    prompt = (
+        "Convert this news research into JSON. "
+        "RAW JSON only -- no markdown, no preamble, no explanation. Start with {\n\n"
+        "RESEARCH:\n" + combined_raw[:4000] + "\n\n"
+        "OUTPUT these exact keys:\n"
+        "market_snapshot: dow/sp500/nasdaq/wti/gas_avg each with value+change+direction\n"
+        "breaking_alert: string (empty if none)\n"
+        "world: array of 3 objects with headline/summary/source/url/severity\n"
+        "national: array of 3 objects with headline/summary/source/url/severity\n"
+        "finance: array of 3 objects with headline/summary/source/url/severity\n"
+        "weather: object with high/low/condition/rain_chance/alerts/wind\n"
+        "cyber: array of 4 objects with headline/summary/source/url/severity\n"
+        "severity values: critical/high/watch/normal"
+    )
     response = with_retry(lambda: client.messages.create(
         model=MODEL_RESEARCH,
         max_tokens=max_tokens,
-        messages=[{"role": "user", "content": format_prompt}]
+        messages=[{"role": "user", "content": prompt}]
     ))
     parts = [b.text for b in response.content if hasattr(b, "text") and b.text]
     return "".join(parts)
 
-# Research: World / National / Finance
-def research_general(client, date_str):
-    print("  [1a] Searching world, national, finance...")
-
-    search_prompt = (
-        "Today is {}. Search the web and find:\n".format(date_str) +
-        "- Top 3 WORLD NEWS stories (international events, wars, geopolitics)\n"
-        "- Top 3 US NATIONAL NEWS stories\n"
-        "- Top 3 FINANCE & MARKETS stories\n"
-        "- Current values: DOW, S&P 500, NASDAQ, WTI crude oil, US avg gas price\n"
-        "- Any major breaking news\n"
-        "Summarize each story in 2-3 sentences with source name and URL."
-    )
-    raw = run_search(client, search_prompt)
-    print("    search complete ({} chars)".format(len(raw)))
-
-    format_prompt = (
-        "Convert this news research into JSON. "
-        "Output RAW JSON only -- no markdown, no preamble. Start with {\n\n"
-        "Research data:\n" + raw[:5000] + "\n\n"
-        "Required JSON structure (fill in real values from the research):\n"
-        "{{\n"
-        '  "market_snapshot": {{\n'
-        '    "dow":     {{"value": "47,250", "change": "+120 (+0.25%)", "direction": "up"}},\n'
-        '    "sp500":   {{"value": "6,800",  "change": "+15 (+0.22%)",  "direction": "up"}},\n'
-        '    "nasdaq":  {{"value": "22,100", "change": "+45 (+0.20%)",  "direction": "up"}},\n'
-        '    "wti":     {{"value": "$88.50", "change": "-1.20",         "direction": "down"}},\n'
-        '    "gas_avg": {{"value": "$3.89",  "change": "+0.05"}}\n'
-        "  }},\n"
-        '  "breaking_alert": "",\n'
-        '  "world":    [{{"headline":"...","summary":"...","source":"...","url":"...","severity":"normal"}}],\n'
-        '  "national": [{{"headline":"...","summary":"...","source":"...","url":"...","severity":"normal"}}],\n'
-        '  "finance":  [{{"headline":"...","summary":"...","source":"...","url":"...","severity":"normal"}}]\n'
-        "}}"
-    )
-    return extract_json(run_format(client, format_prompt))
-
-# Research: Cyber + Weather
-def research_cyber_weather(client, date_str):
-    print("  [1b] Searching cybersecurity + weather...")
-
-    search_prompt = (
-        "Today is {}. Search the web and find:\n".format(date_str) +
-        "- Top 4 CYBERSECURITY stories: active threats, CVEs, CISA advisories, "
-        "nation-state attacks, ransomware, data breaches. Include CVE IDs where relevant.\n"
-        "- WEATHER for Spring TX 77379: high temp, low temp, conditions, "
-        "rain chance %, wind, any NWS severe weather alerts.\n"
-        "Summarize each story in 2-3 sentences with source name and URL."
-    )
-    raw = run_search(client, search_prompt)
-    print("    search complete ({} chars)".format(len(raw)))
-
-    format_prompt = (
-        "Convert this research into JSON. "
-        "Output RAW JSON only -- no markdown, no preamble. Start with {\n\n"
-        "Research data:\n" + raw[:5000] + "\n\n"
-        "Required JSON structure:\n"
-        "{{\n"
-        '  "weather": {{"high":"84F","low":"68F","condition":"Partly Cloudy","rain_chance":"20%","alerts":"None","wind":"S 10 mph"}},\n'
-        '  "cyber": [{{"headline":"...","summary":"...","source":"...","url":"...","severity":"critical/high/watch/normal"}}]\n'
-        "}}"
-    )
-    return extract_json(run_format(client, format_prompt))
-
-# Merge research results
+# Research: all sections in two parallel searches, one combined format call
 def research_news(client, date_str):
     print("[1/2] Researching {}...".format(date_str))
-    general  = research_general(client, date_str)
-    print("  Pausing 20s...")
-    time.sleep(20)
-    cyber_wx = research_cyber_weather(client, date_str)
+
+    # Search A: world / national / finance / markets
+    print("  [A] Searching news + markets...")
+    raw_a = run_search(client, (
+        "Today is {}. Find and summarize:\n".format(date_str) +
+        "- 3 top world news stories (wars, geopolitics, international)\n"
+        "- 3 top US national news stories\n"
+        "- 3 top finance/markets stories\n"
+        "- Current prices: DOW, S&P 500, NASDAQ, WTI crude, US avg gas\n"
+        "- Any breaking news alert\n"
+        "For each story: 2-sentence summary, source name, URL."
+    ))
+    print("    {} chars".format(len(raw_a)))
+
+    print("  Pausing 15s...")
+    time.sleep(15)
+
+    # Search B: cyber + weather
+    print("  [B] Searching cyber + weather...")
+    raw_b = run_search(client, (
+        "Today is {}. Find and summarize:\n".format(date_str) +
+        "- 4 cybersecurity stories: threats, CVEs, CISA advisories, "
+        "nation-state attacks, ransomware, breaches (include CVE IDs)\n"
+        "- Weather for Spring TX 77379: high, low, condition, rain %, wind, alerts\n"
+        "For each story: 2-sentence summary, source name, URL."
+    ))
+    print("    {} chars".format(len(raw_b)))
+
+    # Single format call combining both searches
+    print("  [C] Formatting to JSON (single call)...")
+    combined = "=== NEWS/MARKETS ===\n" + raw_a + "\n\n=== CYBER/WEATHER ===\n" + raw_b
+    text = run_format(client, combined)
+    data = extract_json(text)
+
+    # Normalize into expected structure
     merged = {
         "date_display":    date_str,
-        "market_snapshot": general.get("market_snapshot", {}),
-        "weather":         cyber_wx.get("weather", {}),
-        "breaking_alert":  general.get("breaking_alert", ""),
+        "market_snapshot": data.get("market_snapshot", {}),
+        "weather":         data.get("weather", {}),
+        "breaking_alert":  data.get("breaking_alert", ""),
         "sections": {
-            "world":    general.get("world",    []),
-            "national": general.get("national", []),
-            "finance":  general.get("finance",  []),
-            "cyber":    cyber_wx.get("cyber",   []),
+            "world":    data.get("world",    []),
+            "national": data.get("national", []),
+            "finance":  data.get("finance",  []),
+            "cyber":    data.get("cyber",    []),
         }
     }
     total = sum(len(v) for v in merged["sections"].values())
