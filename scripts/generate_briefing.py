@@ -75,7 +75,7 @@ def with_retry(fn, max_retries=4, base_delay=65):
                 raise
 
 # Agentic loop for multi-turn tool use
-def run_with_tools(client, prompt, tools, max_tokens=2500, max_turns=6):
+def run_with_tools(client, prompt, tools, max_tokens=2500, max_turns=10):
     messages = [{"role": "user", "content": prompt}]
     for turn in range(max_turns):
         response = with_retry(lambda: client.messages.create(
@@ -85,18 +85,45 @@ def run_with_tools(client, prompt, tools, max_tokens=2500, max_turns=6):
             messages=messages
         ))
         text_parts = [b.text for b in response.content if b.type == "text"]
+
         if response.stop_reason == "end_turn":
             final = "".join(text_parts)
             if final.strip():
                 return final
             raise ValueError("end_turn with no text on turn {}".format(turn+1))
+
         if response.stop_reason == "tool_use":
+            # Append assistant turn
             messages.append({"role": "assistant", "content": response.content})
+            # Build tool_result blocks for every tool_use block in this response
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    # The web_search tool result is already embedded in the response
+                    # by Anthropic's hosted tool infrastructure as tool_result blocks.
+                    # We just need to surface them. If the result content is on the
+                    # block itself use it; otherwise provide an empty placeholder so
+                    # the conversation can continue.
+                    result_content = getattr(block, "content", None) or ""
+                    if isinstance(result_content, list):
+                        result_content = " ".join(
+                            getattr(c, "text", str(c)) for c in result_content
+                        )
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": str(result_content),
+                    })
+            if tool_results:
+                messages.append({"role": "user", "content": tool_results})
             continue
+
+        # Any other stop reason -- return text if we have it
         final = "".join(text_parts)
         if final.strip():
             return final
         raise ValueError("stop_reason={} with no text".format(response.stop_reason))
+
     raise ValueError("Exceeded {} turns without a final response".format(max_turns))
 
 # Research: World / National / Finance
