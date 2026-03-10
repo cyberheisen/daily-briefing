@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Daily Intelligence Briefing - Tuesday, March 10, 2026</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Playfair+Display:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'IBM Plex Sans', sans-serif;
+            background-color: #0d0f12;
+            color: #e1e4e8;
+            line-height: 1.6;
+        }
+
+        .ticker {
+            position: sticky;
+            top: 0;
+            background-color: #13161b;
+            border-bottom: 1px solid #252a33;
+            padding: 12px 20px;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 13px;
+            z-index: 100;
+            display: flex;
+            gap: 24px;
+            overflow-x: auto;
+            white-space: nowrap;
+        }
+
+        .ticker-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .ticker-label {
+            color: #c8a96e;
+            font-weight: 600;
+        }
+
+        .ticker-value {
+            color: #e1e4e8;
+        }
+
+        .ticker-change {
+            font-size: 11px;
+        }
+
+        .ticker-change.down {
+            color: #e05555;
+        }
+
+        .ticker-change.up {
+            color: #4caf79;
+        }
+
+        .alert-banner {
+            background: linear-gradient(135deg, #e05555 0%, #c03030 100%);
+            color: #ffffff;
+            padding: 16px 20px;
+            font-weight: 600;
+            border-bottom: 2px solid #ff6b6b;
+            animation: fadeIn 0.5s ease-in;
+        }
+
+        .alert-banner::before {
+            content: "⚠ BREAKING: ";
+            font-family: 'IBM Plex Mono', monospace;
+            margin-right: 8px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            text-align: center;
+            padding: 40px 20px;
+            animation: fadeIn 0.8s ease-in;
+        }
+
+        .header h1 {
+            font-family: 'Playfair Display', serif;
+            font-size: 42px;
+            font-weight: 700;
+            color: #c8a96e;
+            margin-bottom: 8px;
+            letter-spacing: -0.5px;
+        }
+
+        .header .date {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 14px;
+            color: #8b949e;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: 1fr 340px;
+            gap: 30px;
+            animation: fadeIn 1s ease-in;
+        }
+
+        .main-content {
+            min-width: 0;
+        }
+
+        .sidebar {
+            position: sticky;
+            top: 60px;
+            height: fit-content;
+        }
+
+        .section {
+            margin-bottom: 40px;
+        }
+
+        .section-header {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: #c8a96e;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #252a33;
+            font-weight: 600;
+        }
+
+        .story-card {
+            background-color: #13161b;
+            border: 1px solid #252a33;
+            border-radius: 8px;
+            padding: 24px;
+            margin-bottom: 20px;
+            transition: all 0.3s ease;
+            animation: fadeIn 0.6s ease-in;
+        }
+
+        .story-card:hover {
+            border-color: #c8a96e;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+
+        .story-header {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .severity-badge {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            padding: 4px 8px;
+            border-radius: 4px;
+            white-space: nowrap;
+            letter-spacing: 0.5px;
+        }
+
+        .severity-critical {
+            background-color: rgba(224, 85, 85, 0.2);
+            color: #e05555;
+            border: 1px solid #e05555;
+        }
+
+        .severity-high {
+            background-color: rgba(255, 165, 0, 0.2);
+            color: #ffa500;
+            border: 1px solid #ffa500;
+        }
+
+        .severity-normal {
+            background-color: rgba(78, 154, 241, 0.2);
+            color: #4e9af1;
+            border: 1px solid #4e9af1;
+        }
+
+        .story-headline {
+            font-family: 'Playfair Display', serif;
+            font-size: 22px;
+            font-weight: 600;
+            line-height: 1.3;
+            color: #e1e4e8;
+            margin-bottom: 12px;
+        }
+
+        .story-summary {
+            color: #c9d1d9;
+            margin-bottom: 14px;
+            line-height: 1.7;
+        }
+
+        .story-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 13px;
+            color: #8b949e;
+            font-family: 'IBM Plex Mono', monospace;
+        }
+
+        .story-source {
+            color: #8b949e;
+        }
+
+        .story-link {
+            color: #4e9af1;
+            text-decoration: none;
+            transition: color 0.2s;
+        }
+
+        .story-link:hover {
+            color: #6fb1ff;
+            text-decoration: underline;
+        }
+
+        .widget {
+            background-color: #13161b;
+            border: 1px solid #252a33;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .widget-title {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: #c8a96e;
+            margin-bottom: 16px;
+            font-weight: 600;
+        }
+
+        .weather-main {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .weather-temp {
+            font-size: 36px;
+            font-weight: 600;
+            color: #e1e4e8;
+        }
+
+        .weather-condition {
+            text-align: right;
+            color: #c9d1d9;
+        }
+
+        .weather-details {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            font-size: 13px;
+            color: #8b949e;
+            font-family: 'IBM Plex Mono', monospace;
+        }
+
+        .weather-detail {
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .weather-detail-label {
+            color: #6e7681;
+        }
+
+        .market-grid {
+            display: grid;
+            gap: 12px;
+        }
+
+        .market-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+            border-bottom: 1px solid #252a33;
+        }
+
+        .market-item:last-child {
+            border-bottom: none;
+        }
+
+        .market-label {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 12px;
+            color: #8b949e;
+            font-weight: 600;
+        }
+
+        .market-data {
+            text-align: right;
+        }
+
+        .market-value {
+            font-size: 16px;
+            font-weight: 600;
+            color: #e1e4e8;
+        }
+
+        .market-change {
+            font-size: 11px;
+            font-family: 'IBM Plex Mono', monospace;
+        }
+
+        .market-change.down {
+            color: #e05555;
+        }
+
+        .market-change.up {
+            color: #4caf79;
+        }
+
+        .quick-links {
+            list-style: none;
+        }
+
+        .quick-links li {
+            margin-bottom: 10px;
+        }
+
+        .quick-links a {
+            color: #4e9af1;
+            text-decoration: none;
+            font-size: 14px;
+            transition: color 0.2s;
+            display: block;
+        }
+
+        .quick-links a:hover {
+            color: #6fb1ff;
+            text-decoration: underline;
+        }
+
+        .footer {
+            text-align: center;
+            padding: 40px 20px;
+            color: #6e7681;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 12px;
+            border-top: 1px solid #252a33;
+            margin-top: 40px;
+        }
+
+        .footer a {
+            color: #4e9af1;
+            text-decoration: none;
+        }
+
+        .footer a:hover {
+            text-decoration: underline;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @media (max-width: 900px) {
+            .layout {
+                grid-template-columns: 1fr;
+            }
+
+            .sidebar {
+                position: static;
+            }
+
+            .header h1 {
+                font-size: 32px;
+            }
+
+            .ticker {
+                font-size: 11px;
+                gap: 16px;
+            }
+
+            .story-headline {
+                font-size: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="ticker">
+        <div class="ticker-item">
+            <span class="ticker-label">DOW</span>
+            <span class="ticker-value">47,494</span>
+            <span class="ticker-change down">-246 (-0.52%)</span>
+        </div>
+        <div class="ticker-item">
+            <span class="ticker-label">S&P</span>
+            <span class="ticker-value">6,784</span>
+            <span class="ticker-change down">-12 (-0.17%)</span>
+        </div>
+        <div class="ticker-item">
+            <span class="ticker-label">NASDAQ</span>
+            <span class="ticker-value">22,703</span>
+            <span class="ticker-change up">+7 (+0.03%)</span>
+        </div>
+        <div class="ticker-item">
+            <span class="ticker-label">WTI</span>
+            <span class="ticker-value">$88.46</span>
+            <span class="ticker-change down">-6.31 (-6.68%)</span>
+        </div>
+        <div class="ticker-item">
+            <span class="ticker-label">GAS</span>
+            <span class="ticker-value">$3.54</span>
+            <span class="ticker-change">+0.06</span>
+        </div>
+    </div>
+
+    <div class="alert-banner">
+        Iran conflict enters day 11: Trump says war may end soon but Iran vows to continue; oil plunges from $120 highs to below $90
+    </div>
+
+    <div class="container">
+        <div class="header">
+            <h1>Daily Intelligence Briefing</h1>
+            <div class="date">Tuesday, March 10, 2026</div>
+        </div>
+
+        <div class="layout">
+            <div class="main-content">
+                <div class="section">
+                    <div class="section-header">🌍 World</div>
+                    
+                    <div class="story-card">
+                        <div class="story-header">
+                            <span class="severity-badge severity-critical">Critical</span>
+                        </div>
+                        <h2 class="story-headline">Iran Rejects Trump Claims War Near End, Vows Continued Strikes</h2>
+                        <p class="story-summary">Iran's Revolutionary Guard rejected President Trump's statement that the US-Israeli war is 'very complete,' saying they are deploying more powerful missiles with warheads over 1 tonne. US-Israeli airstrikes have killed at least 1,332 Iranian civilians since the conflict began late February. Defense Secretary Pete Hegseth says Tuesday will see the most intense strikes yet.</p>
+                        <div class="story-footer">
+                            <span class="story-source">Al Jazeera, Just Security</span>
+                            <a href="https://www.aljazeera.com/news/liveblog/2026/3/10/iran-war-live-trump-says-conflict-will-be-over-soon-40-killed-in-tehran" target="_blank" class="story-link">Read More →</a>
+                        </div>
+                    </div>
+
+                    <div class="story-card">
+                        <div class="story-header">
+                            <span class="severity-badge severity-critical">Critical</span>
+                        </div>
+                        <h2 class="story-headline">Lebanon Death Toll Nears 500, Nearly 700,000 Displaced</h2>
+                        <p class="story-summary">Israeli airstrikes on Lebanon have killed almost 500 people with another day of attacks. UNICEF reports that escalating hostilities have forced nearly 700,000 people, including 200,000 children, to flee their homes. Iranian airstrikes on Bahrain wounded over 30 and sparked fires near a petroleum refinery.</p>
+                        <div class="story-footer">
+                            <span class="story-source">Reuters, Just Security</span>
+                            <a href="https://www.justsecurity.org/133456/early-edition-march-10-2026/" target="_blank" class="story-link">Read More →</a>
+                        </div>
+                    </div>
+
+                    <div class="story-card">
+                        <div class="story-header">
+                            <span class="severity-badge severity-critical">Critical</span>
+                        </div>
+                        <h2 class="story-headline">US Intercepts Iranian Encrypted Communications for 'Sleeper Assets'</h2>
+                        <p class="story-summary">The United States intercepted encrypted communications believed to have originated in Iran that may serve as an 'operational trigger' for sleeper assets outside Iran, according to a federal government alert. The transmission was relayed shortly after the killing of Ayatollah Ali Khamenei and appeared destined for clandestine recipients.</p>
+                        <div class="story-footer">
+                            <span class="story-source">ABC News via Just Security</span>
+                            <a href="https://www.justsecurity.org/133456/early-edition-march-10-2026/" target="_blank" class="story-link">Read More →</a>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="section">
+                    <div class="section-header">🇺🇸 National</div>
+                    
+                    <div class="story-card">
+                        <div class="story-header">
+                            <span class="severity-badge severity-normal">Normal</span>
+                        </div>
+                        <h2 class="story-headline">Wyoming Becomes Fifth State to Ban Abortion After Heartbeat Detected</h2>
+                        <p class="story-summary">Wyoming Governor Mark Gordon signed new legislation protecting unborn babies from abortion after a heartbeat is detected, typically around six weeks. The law includes exceptions for cases where the mother's life or health is threatened but not for rape or incest. Critics call it an attack on reproductive rights.</p>
+                        <div class="story-footer">
+                            <span class="story-source">WORLD Radio</span>
+                            <a href="https://wng.org/podcasts/tuesday-morning-news-march-10-2026-1773074006" target="_blank" class="story-link">Read More →</a>
+                        </div>
+                    </div>
+
+                    <div class="story-card">
+                        <div class="story-header">
+                            <span class="severity-badge severity-high">High</span>
+                        </div>
+                        <h2 class="story-headline">Two Teens Charged in NYC Attack Attempt With Explosive Devices</h2>
+                        <p class="story-summary">Two men have been charged with allegedly providing support to a foreign terrorism organization and using a weapon of mass destruction in New York City. NYPD Commissioner says the explosive devices 'could have caused serious injury or death.' The suspects are accused of attempting an attack in Manhattan.</p>
+                        <div class="story-footer">
+                            <span class="story-source">NPR, CNBC</span>
+                            <a href="https://knpr.org/npr/2026-03-10/morning-news-brief" target="_blank" class="story-link">Read More →</a>
+                        </div>
+                    </div>
+
+                    <div class="story-card">
+                        <div class="story-header">
+                            <span class="severity-badge severity-high">High</span>
+                        </div>
+                        <h2 class="story-headline">At Least 11 Immigrants Die in ICE Custody Since January 2026</h2>
+                        <p class="story-summary">According to ICE data, at least 11 immigrants have died in ICE custody from January 2026 through early March. The deaths come amid heightened immigration enforcement under the Trump administration and increased detention capacity at facilities nationwide.</p>
+                        <div class="story-footer">
+                            <span class="story-source">Just Security</span>
+                            <a href="https://www.justsecurity.org/133456/early-edition-march-10-2026/" target="_blank" class="story-link">Read More →</a>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="section">
+                    <div class="section-header">💰 Finance</div>
+                    
+                    <div class="story-card">
+                        <div class="story-header">
+                            <span class="severity-badge severity-critical">Critical</span>
+                        </div>
+                        <h2 class="story-headline">Oil Crashes 6.7% as Trump Says Iran War May End 'Very Soon'</h2>
+                        <p class="story-summary">WTI crude plunged from overnight highs of $119 per barrel to $88.46, down 6.7%, after President Trump told CBS News the war is 'very complete' and Iran has 'no navy, no Air Force.' However, markets remain volatile as Iran vows to continue fighting and oil tanker traffic through Strait of Hormuz remains blocked.</p>
+                        <div class="story-footer">
+                            <span class="story-source">Bloomberg, Yahoo Finance</span>
+                            <a href="https://www.bloomberg.com/news/articles/2026-03-09/oil-drops-as-trump-signals-iran-conflict-near-end-markets-wrap" target="_blank" class="story-link">Read More →</a>
+                        </div>
+                    </div>
+
+                    <div class="story-card">
+                        <div class="story-header">
+                            <span class="severity-badge severity-high">High</span>
+                        </div>
+                        <h2 class="story-headline">Stock Markets Reverse Course Despite Oil Decline, Inflation Fears Persist</h2>
+                        <p class="story-summary">US equities turned negative Tuesday after early gains, with Dow down 246 points (-0.52%), S&P 500 down 12 points (-0.17%), as Treasury yields rose despite falling oil prices. Markets remain jittery about inflation and Federal Reserve policy. Fed meeting scheduled for March 17-18 to address interest rate cuts, while CPI report due Wednesday.</p>
+                        <div class="story-footer">
+                            <span class="story-source">TheStreet, Trading Economics</span>
+                            <a href="https://www.thestreet.com/latest-news/stock-market-today-march-10-2026" target="_blank" class="story-link">Read More →</a>
+                        </div>
+                    </div>
+
+                    <div class="story-card">
+                        <div class="story-header">
+                            <span class="severity-badge severity-high">High</span>
+                        </div>
+                        <h2 class="story-headline">Gas Prices Surge to $3.54 National Average, Up 48 Cents in One Week</h2>
+                        <p class="story-summary">The national average for regular gasoline jumped to $3.54 per gallon, up 48 cents from last week and 58 cents from a month ago, according to AAA. California drivers pay $5.20 per gallon while Kansas has the lowest at $2.92. Analysts predict prices could reach $4.00 by end of March if conflict continues.</p>
+                        <div class="story-footer">
+                            <span class="story-source">CBS News, AAA</span>
+                            <a href="https://www.cbsnews.com/news/gas-prices-today-us-iran-war-oil-strait-of-hormuz/" target="_blank" class="story-link">Read More →</a>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="section">
+                    <div class="section-header">🔐 Cybersecurity</div>
+                    
+                    <div class="story-card">
+                        <div class="story-header">
+                            <span class="severity-badge severity-high">High</span>
+                        </div>
+                        <h2 class="story-headline">CISA Adds Ivanti Endpoint Manager Authentication Bypass to KEV Catalog</h2>
+                        <p class="story-summary">CVE-2026-1603 affects Ivanti Endpoint Manager (EPM) with an authentication bypass vulnerability allowing remote unauthenticated attackers to leak stored credential data. CISA added this to the Known Exploited Vulnerabilities catalog on March 9, 2026, with active exploitation confirmed.</p>
+                        <div class="story-footer">
+                            <span class="story-source">CISA</span>
+                            <a href="https://www.cisa.gov/news-events/alerts/2026/03/09/cisa-adds-three-known-exploited-vulnerabilities-catalog" target="_blank" class="story-link">Read More →</a>
+                        </div>
+                    </div>
+
+                    <div class="story-card">
+                        <div class="story-header">
+                            <span class="severity-badge severity-critical">Critical</span>
+                        </div>
+                        <h2 class="story-headline">VMware Aria Operations Command Injection Actively Exploited</h2>
+                        <p class="story-summary">CVE-2026-22719 is a high-severity command injection vulnerability in Broadcom VMware Aria Operations allowing unauthenticated attackers to execute arbitrary commands and achieve remote code execution. Federal agencies required to patch by March 24, 2026.</p>
+                        <div class="story-footer">
+                            <span class="story-source">CISA / The Hacker News</span>
+                            <a href="https://thehackernews.com/2026/03/cisa-adds-actively-exploited-vmware.html" target="_blank" class="story-link">Read More →</a>
+                        </div>
+                    </div>
+
+                    <div class="story-card">
+                        <div class="story-header">
+                            <span class="severity-badge severity-critical">Critical</span>
+                        </div>
+                        <h2 class="story-headline">North Korean APT UNC4899 Cryptocurrency Cloud Heist</h2>
+                        <p class="story-summary">North Korean state-sponsored group UNC4899 (Jade Sleet) conducted sophisticated cloud compromise targeting cryptocurrency organization in 2025, stealing millions through social engineering and living-off-the-cloud techniques, abusing DevOps workflows to tamper with Cloud SQL databases.</p>
+                        <div class="story-footer">
+                            <span class="story-source">The Hacker News / Google Cloud Threat Horizons</span>
+                            <a href="https://thehackernews.com/" target="_blank" class="story-link">Read More →</a>
+                        </div>
+                    </div>
+
+                    <div class="story-card">
+                        <div class="story-header">
+                            <span class="severity-badge severity-high">High</span>
+                        </div>
+                        <h2 class="story-headline">Malaysia Airlines Hit by Quilin Ransomware, Lacoste by Lapsus$</h2>
+                        <p class="story-summary">Multiple major breaches in March 2026 include Malaysia Airlines ransomware attack by Quilin group compromising passenger bookings, personnel files, and operational documents. Separately, Lacoste SA targeted by Lapsus$ ransomware group. USHA International employee and SAP databases also compromised.</p>
+                        <div class="story-footer">
+                            <span class="story-source">SharkStriker</span>
+                            <a href="https://sharkstriker.com/blog/march-data-breaches-today-2026/" target="_blank" class="story-link">Read More →</a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="sidebar">
+                <div class="widget">
+                    <div class="widget-title">Weather - Spring, TX</div>
+                    <div class="weather-main">
+                        <div class="weather-temp">83°F</div>
+                        <div class="weather-condition">Mostly Cloudy</div>
+                    </div>
+                    <div class="weather-details">
+                        <div class="weather-detail">
+                            <span class="weather-detail-label">Low:</span>
+                            <span>70°F</span>
+                        </div>
+                        <div class="weather-detail">
+                            <span class="weather-detail-label">Rain:</span>
+                            <span>10%</span>
+                        </div>
+                        <div class="weather-detail">
+                            <span class="weather-detail-label">Wind:</span>
+                            <span>S 10-15 mph</span>
+                        </div>
+                        <div class="weather-detail">
+                            <span class="weather-detail-label">Alerts:</span>
+                            <span>None</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="widget">
+                    <div class="widget-title">Market Snapshot</div>
+                    <div class="market-grid">
+                        <div class="market-item">
+                            <span class="market-label">DOW</span>
+                            <div class="market-data">
+                                <div class="market-value">47,494</div>
+                                <div class="market-change down">-246 (-0.52%)</div>
+                            </div>
+                        </div>
+                        <div class="market-item">
+                            <span class="market-label">S&P 500</span>
+                            <div class="market-data">
+                                <div class="market-value">6,784</div>
+                                <div class="market-change down">-12 (-0.17%)</div>
+                            </div>
+                        </div>
+                        <div class="market-item">
+                            <span class="market-label">NASDAQ</span>
+                            <div class="market-data">
+                                <div class="market-value">22,703</div>
+                                <div class="market-change up">+7 (+0.03%)</div>
+                            </div>
+                        </div>
+                        <div class="market-item">
+                            <span class="market-label">WTI CRUDE</span>
+                            <div class="market-data">
+                                <div class="market-value">$88.46</div>
+                                <div class="market-change down">-6.31 (-6.68%)</div>
+                            </div>
+                        </div>
+                        <div class="market-item">
+                            <span class="market-label">GAS AVG</span>
+                            <div class="market-data">
+                                <div class="market-value">$3.54</div>
+                                <div class="market-change">+0.06</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="widget">
+                    <div class="widget-title">Quick Links</div>
+                    <ul class="quick-links">
+                        <li><a href="https://www.bleepingcomputer.com/" target="_blank">BleepingComputer</a></li>
+                        <li><a href="https://thehackernews.com/" target="_blank">The Hacker News</a></li>
+                        <li><a href="https://www.cisa.gov/news-events/cybersecurity-advisories" target="_blank">CISA Advisories</a></li>
+                        <li><a href="https://finance.yahoo.com/" target="_blank">Yahoo Finance</a></li>
+                        <li><a href="https://www.fox
