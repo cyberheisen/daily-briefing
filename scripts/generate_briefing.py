@@ -12,12 +12,15 @@ import os
 import json
 import re
 import time
+import urllib.request
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from html import escape
 
 # Models
-MODEL_RESEARCH = "claude-haiku-4-5"
+MODEL_SEARCH = "claude-haiku-4-5"   # web search calls
+MODEL_FORMAT = "claude-haiku-4-5"   # JSON formatting
+MODEL_RESEARCH = MODEL_SEARCH        # legacy alias
 
 # Date / edition helpers
 def get_cst_now():
@@ -99,13 +102,12 @@ def run_format(client, combined_raw, max_tokens=3000):
         "Convert this news research into JSON. "
         "RAW JSON only -- no markdown, no preamble, no explanation. Start with {\n\n"
         "RESEARCH:\n" + trimmed + "\n\n"
-        "OUTPUT these exact keys (all required):\n"
+        "OUTPUT these exact keys:\n"
         "market_snapshot: dow/sp500/nasdaq/wti/gas_avg each with value+change+direction\n"
         "breaking_alert: string (empty if none)\n"
         "world: array of 3 objects: headline/summary(1 sentence)/source/url/severity\n"
         "national: array of 3 objects: headline/summary(1 sentence)/source/url/severity\n"
         "finance: array of 3 objects: headline/summary(1 sentence)/source/url/severity\n"
-        "weather: object: high/low/condition/rain_chance/alerts/wind\n"
         "cyber: array of 4 objects: headline/summary(1 sentence)/source/url/severity\n"
         "severity: critical/high/watch/normal"
     )
@@ -120,9 +122,91 @@ def run_format(client, combined_raw, max_tokens=3000):
         len(result), response.stop_reason))
     return result
 
-# Research: all sections in two parallel searches, one combined format call
+
+# Free NWS weather fetch -- no API key, no LLM tokens
+def fetch_nws_weather():
+    """
+    Fetch current forecast for Spring TX (30.0799, -95.4172) from the
+    National Weather Service free REST API. Returns a weather dict
+    compatible with the rest of the pipeline. Falls back to placeholder
+    values if the API is unreachable.
+    """
+    try:
+        headers = {"User-Agent": "daily-briefing/1.0 (personal use)"}
+
+        # Step 1: get the grid point for Spring TX
+        req = urllib.request.Request(
+            "https://api.weather.gov/points/30.0799,-95.4172",
+            headers=headers
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            point = json.loads(r.read())
+
+        forecast_url = point["properties"]["forecast"]
+        hourly_url   = point["properties"]["forecastHourly"]
+
+        # Step 2: get the daily forecast
+        req2 = urllib.request.Request(forecast_url, headers=headers)
+        with urllib.request.urlopen(req2, timeout=10) as r:
+            forecast = json.loads(r.read())
+
+        periods = forecast["properties"]["periods"]
+        today   = [p for p in periods if p.get("isDaytime", True)]
+        tonight = [p for p in periods if not p.get("isDaytime", True)]
+
+        day = today[0]   if today   else periods[0]
+        ngt = tonight[0] if tonight else periods[1] if len(periods) > 1 else {}
+
+        # Parse rain chance
+        prob = day.get("probabilityOfPrecipitation", {})
+        rain_pct = prob.get("value") if prob else None
+        rain_str = "{}%".format(rain_pct) if rain_pct is not None else "N/A"
+
+        # Wind
+        wind = "{} {}".format(
+            day.get("windDirection", ""),
+            day.get("windSpeed", "")
+        ).strip()
+
+        # Check for active alerts
+        req3 = urllib.request.Request(
+            "https://api.weather.gov/alerts/active?point=30.0799,-95.4172",
+            headers=headers
+        )
+        with urllib.request.urlopen(req3, timeout=10) as r:
+            alerts_data = json.loads(r.read())
+
+        alert_features = alerts_data.get("features", [])
+        if alert_features:
+            alert_str = alert_features[0]["properties"].get("headline", "Active NWS Alert")
+        else:
+            alert_str = "None"
+
+        wx = {
+            "high":       "{}F".format(day.get("temperature", "--")),
+            "low":        "{}F".format(ngt.get("temperature", "--")),
+            "condition":  day.get("shortForecast", "--"),
+            "rain_chance": rain_str,
+            "wind":       wind or "--",
+            "alerts":     alert_str,
+        }
+        print("  [NWS] Weather fetched: {} / {} / {}".format(
+            wx["high"], wx["condition"], wx["rain_chance"]))
+        return wx
+
+    except Exception as e:
+        print("  [NWS] Fetch failed ({}), using placeholder".format(e))
+        return {
+            "high": "--", "low": "--", "condition": "Unavailable",
+            "rain_chance": "--", "alerts": "None", "wind": "--",
+        }
+
+# Research: two searches + free NWS weather + one format call
 def research_news(client, date_str):
     print("[1/2] Researching {}...".format(date_str))
+
+    # Free NWS weather -- zero LLM tokens
+    weather = fetch_nws_weather()
 
     # Search A: world / national / finance / markets
     print("  [A] Searching news + markets...")
@@ -133,35 +217,33 @@ def research_news(client, date_str):
         "- 3 top finance/markets stories\n"
         "- Current prices: DOW, S&P 500, NASDAQ, WTI crude, US avg gas\n"
         "- Any breaking news alert\n"
-        "For each story: 2-sentence summary, source name, URL."
+        "For each story: 1-sentence summary, source name, URL."
     ))
     print("    {} chars".format(len(raw_a)))
 
     print("  Pausing 15s...")
     time.sleep(15)
 
-    # Search B: cyber + weather
-    print("  [B] Searching cyber + weather...")
+    # Search B: cyber only (weather now handled by NWS)
+    print("  [B] Searching cybersecurity...")
     raw_b = run_search(client, (
         "Today is {}. Find and summarize:\n".format(date_str) +
-        "- 4 cybersecurity stories: threats, CVEs, CISA advisories, "
+        "- 4 cybersecurity stories: active threats, CVEs, CISA advisories, "
         "nation-state attacks, ransomware, breaches (include CVE IDs)\n"
-        "- Weather for Spring TX 77379: high, low, condition, rain %, wind, alerts\n"
-        "For each story: 2-sentence summary, source name, URL."
+        "For each story: 1-sentence summary, source name, URL."
     ))
     print("    {} chars".format(len(raw_b)))
 
-    # Single format call combining both searches
-    print("  [C] Formatting to JSON (single call)...")
-    combined = "=== NEWS/MARKETS ===\n" + raw_a + "\n\n=== CYBER/WEATHER ===\n" + raw_b
+    # Single format call -- no weather key needed
+    print("  [C] Formatting to JSON...")
+    combined = "=== NEWS/MARKETS ===\n" + raw_a + "\n\n=== CYBERSECURITY ===\n" + raw_b
     text = run_format(client, combined)
     data = extract_json(text)
 
-    # Normalize into expected structure
     merged = {
         "date_display":    date_str,
         "market_snapshot": data.get("market_snapshot", {}),
-        "weather":         data.get("weather", {}),
+        "weather":         weather,
         "breaking_alert":  data.get("breaking_alert", ""),
         "sections": {
             "world":    [x for x in data.get("world",    []) if x and isinstance(x, dict)],
@@ -224,10 +306,10 @@ def render_ticker(mkt):
     ]
     parts = []
     for name, m in rows:
-        val = escape(str(m.get("value",  "--")))
-        chg = escape(str(m.get("change", "")))
-        dc  = dir_cls(m.get("direction", "up"))
-        arr = dir_arr(m.get("direction", "up"))
+        val = escape(str(m.get("value")  or "--"))
+        chg = escape(str(m.get("change") or ""))
+        dc  = dir_cls(m.get("direction") or "up")
+        arr = dir_arr(m.get("direction") or "up")
         parts.append(
             '<div class="ticker-item">'
             '<span class="ticker-name">{}</span>'
@@ -240,13 +322,13 @@ def render_ticker(mkt):
 def render_stories(stories):
     out = []
     for s in [x for x in (stories or []) if x and isinstance(x, dict)]:
-        sev   = s.get("severity", "normal").lower()
+        sev   = (s.get("severity") or "normal").lower()
         cls   = SEVERITY_CLASS.get(sev, "badge-normal")
         label = sev.capitalize()
-        hl    = escape(s.get("headline", ""))
-        summ  = escape(s.get("summary",  ""))
-        src   = escape(s.get("source",   ""))
-        url   = escape(s.get("url",      "#"))
+        hl    = escape(str(s.get("headline") or ""))
+        summ  = escape(str(s.get("summary")  or ""))
+        src   = escape(str(s.get("source")   or ""))
+        url   = escape(str(s.get("url")      or "#"))
         out.append(
             '<div class="story">'
             '<div class="story-meta"><span class="badge {}">{}</span></div>'
@@ -277,12 +359,12 @@ def render_sections(sections):
     return "\n    ".join(out)
 
 def render_weather(wx):
-    high  = escape(wx.get("high",       "--"))
-    low   = escape(wx.get("low",        "--"))
-    cond  = escape(wx.get("condition",  "--"))
-    rain  = escape(wx.get("rain_chance","--"))
-    wind  = escape(wx.get("wind",       "--"))
-    alert = escape(wx.get("alerts",     "None"))
+    high  = escape(str(wx.get("high")       or "--"))
+    low   = escape(str(wx.get("low")        or "--"))
+    cond  = escape(str(wx.get("condition")  or "--"))
+    rain  = escape(str(wx.get("rain_chance")or "--"))
+    wind  = escape(str(wx.get("wind")       or "--"))
+    alert = escape(str(wx.get("alerts")     or "None"))
     icon  = weather_icon(cond)
     alert_html = ""
     if alert and alert.lower() not in ("none", "no alerts", ""):
@@ -308,10 +390,10 @@ def render_markets(mkt):
     ]
     out = []
     for name, m in rows:
-        val = escape(str(m.get("value",  "--")))
-        chg = escape(str(m.get("change", "")))
-        dc  = dir_cls(m.get("direction", "up"))
-        arr = dir_arr(m.get("direction", "up"))
+        val = escape(str(m.get("value")  or "--"))
+        chg = escape(str(m.get("change") or ""))
+        dc  = dir_cls(m.get("direction") or "up")
+        arr = dir_arr(m.get("direction") or "up")
         out.append(
             '<div class="market-row">'
             '<span class="market-name">{}</span>'
