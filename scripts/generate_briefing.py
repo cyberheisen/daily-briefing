@@ -2,9 +2,12 @@
 # -*- coding: utf-8 -*-
 """
 Daily Briefing Generator
-- RSS feeds for all news content (free, no API tokens)
-- NWS REST API for weather (free, no API tokens)
-- One small Haiku call for story selection + severity tagging
+- 16 RSS feeds (BBC, Al Jazeera, Reuters, NPR, PBS, AP, MarketWatch,
+  Bleeping Computer, Hacker News, CISA, Krebs) -- free, no tokens
+- NWS REST API for weather -- free, no tokens
+- Article fetch + HTML parse for full story text -- free, no tokens
+- Haiku call 1: select stories + assign severity (explicit rules)
+- Haiku call 2: write 2-sentence summaries from article text
 - Zero LLM calls for HTML -- pure Python template renderer
 - Target cost: ~$0.01-0.02/run
 """
@@ -80,131 +83,201 @@ def with_retry(fn, max_retries=4, base_delay=65):
                 raise
 
 # ── RSS FEEDS ────────────────────────────────────────────────────────────────
-# All free, no API keys. Pulled fresh each run.
+# All free, no paywall, bot-permissive. 4 sources per section.
 RSS_FEEDS = {
     "world": [
-        "https://feeds.bbci.co.uk/news/world/rss.xml",
-        "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
-        "https://feeds.reuters.com/reuters/worldNews",
+        "https://feeds.bbci.co.uk/news/world/rss.xml",          # BBC World
+        "https://www.aljazeera.com/xml/rss/all.xml",             # Al Jazeera
+        "https://feeds.reuters.com/reuters/worldNews",           # Reuters World
+        "https://feeds.npr.org/1004/rss.xml",                    # NPR World
     ],
     "national": [
-        "https://feeds.bbci.co.uk/news/rss.xml",
-        "https://rss.nytimes.com/services/xml/rss/nyt/US.xml",
-        "https://feeds.npr.org/1001/rss.xml",
+        "https://feeds.npr.org/1001/rss.xml",                    # NPR News
+        "https://www.pbs.org/newshour/feeds/rss/headlines",      # PBS NewsHour
+        "https://feeds.npr.org/1003/rss.xml",                    # NPR Politics
+        "https://rss.csmonitor.com/feeds/all",                   # Christian Science Monitor
     ],
     "finance": [
-        "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^DJI,^GSPC,^IXIC&region=US&lang=en-US",
-        "https://feeds.reuters.com/reuters/businessNews",
-        "https://www.cnbc.com/id/10000664/device/rss/rss.html",
+        "https://feeds.reuters.com/reuters/businessNews",        # Reuters Business
+        "https://feeds.marketwatch.com/marketwatch/topstories",  # MarketWatch
+        "https://feeds.npr.org/1017/rss.xml",                    # NPR Economy
+        "https://feeds.reuters.com/reuters/companyNews",         # Reuters Companies
     ],
     "cyber": [
-        "https://feeds.feedburner.com/TheHackersNews",
-        "https://www.bleepingcomputer.com/feed/",
-        "https://www.cisa.gov/cybersecurity-advisories/all.xml",
+        "https://feeds.feedburner.com/TheHackersNews",           # The Hacker News
+        "https://www.bleepingcomputer.com/feed/",                # Bleeping Computer
+        "https://www.cisa.gov/cybersecurity-advisories/all.xml", # CISA Advisories
+        "https://krebsonsecurity.com/feed/",                     # Krebs on Security
     ],
 }
 
 # ── RSS FETCH ─────────────────────────────────────────────────────────────────
 import xml.etree.ElementTree as ET
+from html.parser import HTMLParser
 
 def fetch_rss(url, max_items=5):
-    """Fetch an RSS feed, return list of {title, summary, url, source} dicts."""
+    """Fetch an RSS/Atom feed. Returns list of {title, summary, url, source}."""
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "daily-briefing/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as r:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "daily-briefing/1.0 (personal news aggregator)"})
+        with urllib.request.urlopen(req, timeout=12) as r:
             raw = r.read()
         root = ET.fromstring(raw)
         ns   = {"atom": "http://www.w3.org/2005/Atom"}
-
-        # Detect Atom vs RSS
-        is_atom = root.tag.endswith("feed")
-        items   = []
+        is_atom = root.tag.endswith("feed") or "Atom" in root.tag
+        items = []
 
         if is_atom:
             for entry in root.findall("atom:entry", ns)[:max_items]:
                 title = (entry.findtext("atom:title", "", ns) or "").strip()
                 summ  = (entry.findtext("atom:summary", "", ns) or
                          entry.findtext("atom:content", "", ns) or "").strip()
+                summ  = re.sub(r'<[^>]+>', '', summ)[:400]
                 link  = entry.find("atom:link", ns)
                 href  = (link.get("href", "") if link is not None else "")
-                items.append({"title": title, "summary": summ[:300], "url": href})
+                src   = url.split("/")[2].replace("www.", "").replace("feeds.", "")
+                items.append({"title": title, "summary": summ, "url": href, "source": src})
         else:
             channel = root.find("channel") or root
-            source  = (channel.findtext("title") or url.split("/")[2]).strip()
+            src     = (channel.findtext("title") or url.split("/")[2]).strip()
             for item in channel.findall("item")[:max_items]:
                 title = (item.findtext("title") or "").strip()
                 summ  = (item.findtext("description") or "").strip()
-                # Strip HTML tags from summary
-                summ  = re.sub(r'<[^>]+>', '', summ)[:300]
+                summ  = re.sub(r'<[^>]+>', '', summ)[:400]
                 link  = (item.findtext("link") or "").strip()
-                items.append({"title": title, "summary": summ, "url": link, "source": source})
-
+                items.append({"title": title, "summary": summ, "url": link, "source": src})
         return items
     except Exception as e:
-        print("    RSS fetch failed {}: {}".format(url, e))
+        print("    RSS skip {}: {}".format(url.split("/")[2], e))
         return []
 
 def fetch_all_rss():
-    """Fetch all feeds, return dict of section -> list of raw items."""
+    """Fetch all feeds. Returns dict section -> deduplicated item list."""
     results = {}
     for section, urls in RSS_FEEDS.items():
         items = []
         for url in urls:
-            items.extend(fetch_rss(url, max_items=4))
-        # Deduplicate by title similarity (simple: first 40 chars)
-        seen  = set()
-        deduped = []
+            items.extend(fetch_rss(url, max_items=5))
+        seen, deduped = set(), []
         for item in items:
-            key = item["title"][:40].lower()
-            if key not in seen:
+            key = item["title"][:50].lower().strip()
+            if key and key not in seen:
                 seen.add(key)
                 deduped.append(item)
-        results[section] = deduped[:8]  # keep top 8 per section for LLM to pick from
-        print("  [RSS] {}: {} items".format(section, len(deduped)))
+        results[section] = deduped[:10]  # top 10 per section for LLM to choose from
+        print("  [RSS] {}: {} items from {} feeds".format(
+            section, len(deduped), len(urls)))
     return results
+
+# ── ARTICLE FETCH ─────────────────────────────────────────────────────────────
+class _ArticleParser(HTMLParser):
+    """Minimal HTML parser that extracts visible paragraph text."""
+    SKIP_TAGS = {"script","style","nav","header","footer","aside",
+                 "noscript","figure","figcaption","form","button","iframe"}
+
+    def __init__(self):
+        super().__init__()
+        self._skip  = 0
+        self._buf   = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SKIP_TAGS:
+            self._skip += 1
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP_TAGS and self._skip > 0:
+            self._skip -= 1
+
+    def handle_data(self, data):
+        if self._skip == 0:
+            t = data.strip()
+            if len(t) > 40:          # skip short nav labels etc.
+                self._buf.append(t)
+
+    def get_text(self):
+        return " ".join(self._buf)
+
+def fetch_article_text(url, char_limit=2000):
+    """
+    Fetch a news article URL and return plain text (up to char_limit chars).
+    Returns None on failure so caller can fall back to RSS description.
+    """
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; daily-briefing/1.0)",
+            "Accept":     "text/html,application/xhtml+xml",
+        })
+        with urllib.request.urlopen(req, timeout=10) as r:
+            # Only read if content-type is HTML
+            ct = r.headers.get("Content-Type", "")
+            if "html" not in ct.lower():
+                return None
+            raw = r.read(65536).decode("utf-8", errors="replace")
+        parser = _ArticleParser()
+        parser.feed(raw)
+        text = parser.get_text()
+        return text[:char_limit] if text else None
+    except Exception:
+        return None
+
+def enrich_with_articles(stories):
+    """
+    For each story, attempt to fetch the article and attach body text.
+    Falls back to RSS summary on failure. Modifies list in place.
+    """
+    for s in stories:
+        url = s.get("url", "")
+        if not url or url == "#":
+            continue
+        text = fetch_article_text(url)
+        if text and len(text) > 100:
+            s["article_text"] = text
+        # else: article_text absent, summarize step uses RSS summary
 
 # ── NWS WEATHER ───────────────────────────────────────────────────────────────
 def fetch_nws_weather():
     """Free NWS weather for Spring TX (30.0799, -95.4172). No API key."""
     try:
-        headers = {"User-Agent": "daily-briefing/1.0 (personal use)"}
-
-        req = urllib.request.Request(
-            "https://api.weather.gov/points/30.0799,-95.4172", headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as r:
+        hdrs = {"User-Agent": "daily-briefing/1.0 (personal use)"}
+        with urllib.request.urlopen(
+                urllib.request.Request(
+                    "https://api.weather.gov/points/30.0799,-95.4172", headers=hdrs),
+                timeout=10) as r:
             point = json.loads(r.read())
 
-        forecast_url = point["properties"]["forecast"]
-
-        req2 = urllib.request.Request(forecast_url, headers=headers)
-        with urllib.request.urlopen(req2, timeout=10) as r:
+        with urllib.request.urlopen(
+                urllib.request.Request(
+                    point["properties"]["forecast"], headers=hdrs),
+                timeout=10) as r:
             forecast = json.loads(r.read())
 
         periods = forecast["properties"]["periods"]
         today   = [p for p in periods if p.get("isDaytime", True)]
         tonight = [p for p in periods if not p.get("isDaytime", True)]
-        day = today[0]   if today   else periods[0]
-        ngt = tonight[0] if tonight else (periods[1] if len(periods) > 1 else {})
+        day     = today[0]   if today   else periods[0]
+        ngt     = tonight[0] if tonight else (periods[1] if len(periods) > 1 else {})
 
         prob     = day.get("probabilityOfPrecipitation", {})
         rain_pct = prob.get("value") if prob else None
         rain_str = "{}%".format(rain_pct) if rain_pct is not None else "N/A"
         wind     = "{} {}".format(
-            day.get("windDirection", ""), day.get("windSpeed", "")).strip()
+            day.get("windDirection",""), day.get("windSpeed","")).strip()
 
-        req3 = urllib.request.Request(
-            "https://api.weather.gov/alerts/active?point=30.0799,-95.4172",
-            headers=headers)
-        with urllib.request.urlopen(req3, timeout=10) as r:
+        with urllib.request.urlopen(
+                urllib.request.Request(
+                    "https://api.weather.gov/alerts/active?point=30.0799,-95.4172",
+                    headers=hdrs),
+                timeout=10) as r:
             alerts_data = json.loads(r.read())
 
         feats     = alerts_data.get("features", [])
-        alert_str = feats[0]["properties"].get("headline", "Active NWS Alert") if feats else "None"
+        alert_str = (feats[0]["properties"].get("headline","Active NWS Alert")
+                     if feats else "None")
 
         wx = {
-            "high":        "{}F".format(day.get("temperature", "--")),
-            "low":         "{}F".format(ngt.get("temperature", "--")),
-            "condition":   day.get("shortForecast", "--"),
+            "high":        "{}F".format(day.get("temperature","--")),
+            "low":         "{}F".format(ngt.get("temperature","--")),
+            "condition":   day.get("shortForecast","--"),
             "rain_chance": rain_str,
             "wind":        wind or "--",
             "alerts":      alert_str,
@@ -216,45 +289,76 @@ def fetch_nws_weather():
         return {"high":"--","low":"--","condition":"Unavailable",
                 "rain_chance":"--","alerts":"None","wind":"--"}
 
+# ── SEVERITY RULES (injected into classify prompt) ────────────────────────────
+SEVERITY_RULES = """
+SEVERITY ASSIGNMENT RULES -- apply strictly:
+
+CRITICAL:
+- Active armed conflict with major escalation or mass casualties
+- Terrorist attack or mass casualty event
+- Major US infrastructure attack (power grid, water, financial system)
+- Ransomware or cyberattack confirmed hitting critical infrastructure
+- Zero-day being actively exploited in the wild with no patch
+- Category 3+ hurricane or EF3+ tornado threatening populated area
+- Market crash (single-day index drop >4%)
+
+HIGH:
+- Significant geopolitical development (new sanctions, treaty, diplomatic crisis)
+- Major election result or political crisis
+- Market move >2% on a major index
+- Named CVE with CVSS score 8.0 or higher
+- CISA Known Exploited Vulnerabilities (KEV) catalog addition
+- Confirmed data breach affecting >1 million records
+- Nation-state attribution for a cyberattack
+- CVE with no patch currently available
+- Severe weather watch or warning for the region
+
+WATCH:
+- Ongoing developing situation worth monitoring
+- Fed announcement, major earnings, economic data release
+- New malware family or threat actor identified
+- Indictment, arrest, or legal action of significance
+- Tropical storm formation or upgrade
+- Patch Tuesday or major vendor security release
+- CISA advisory (non-KEV)
+
+NORMAL:
+- Routine news, analysis, policy updates
+- Minor market movement
+- General cybersecurity research or commentary
+"""
+
 # ── LLM CLASSIFY ─────────────────────────────────────────────────────────────
-# One small Haiku call: pick best stories + assign severity. No web search.
 def classify_and_select(client, rss_data):
     """
-    Send RSS headlines to Haiku. Ask it to:
-    - Pick the 3 most newsworthy stories per section (world/national/finance)
-    - Pick the 4 most important cyber stories
-    - Write a 1-sentence summary for each
-    - Assign severity (critical/high/watch/normal)
-    - Flag a breaking_alert if warranted
-    Returns the merged data dict.
+    Call 1 of 2: Send RSS headlines to Haiku.
+    Picks best stories, assigns severity using explicit rules, returns JSON with URLs.
     """
-    # Build compact input -- just titles + URLs to minimize tokens
     sections_text = ""
     for section in ("world", "national", "finance", "cyber"):
         items = rss_data.get(section, [])
         sections_text += "\n[{}]\n".format(section.upper())
         for i, item in enumerate(items):
-            sections_text += "{}. {}\n   {}\n".format(
+            sections_text += "{}. {} [{}]\n   {}\n".format(
                 i+1,
                 item.get("title",""),
+                item.get("source",""),
                 item.get("url","")
             )
 
-    count = 3  # stories per news section
-    cyber_count = 4
-
     prompt = (
-        "You are a news editor. Given these RSS headlines, select the most important stories "
-        "and output ONLY raw JSON -- no markdown, no explanation.\n\n"
+        "You are a senior news editor. Select the most important stories from these "
+        "RSS headlines and output ONLY raw JSON -- no markdown, no explanation.\n\n"
+        + SEVERITY_RULES + "\n\n"
         "HEADLINES:\n" + sections_text + "\n\n"
-        "Select: {} world, {} national, {} finance, {} cyber stories.\n".format(
-            count, count, count, cyber_count) +
-        "For each: write a 1-sentence summary, assign severity (critical/high/watch/normal), "
-        "include the source domain as source, and the URL.\n"
-        "Also set breaking_alert to a short string if any story is genuinely breaking, else empty string.\n\n"
-        "JSON structure:\n"
+        "Select: 3 world, 3 national, 3 finance, 4 cyber stories.\n"
+        "For each story output: headline (use original title), source (domain name), "
+        "url, severity (apply rules above strictly), "
+        "and rss_summary (the RSS description, 1 sentence max).\n"
+        "Also set breaking_alert to a 1-sentence string if any story is CRITICAL, else \"\".\n\n"
+        "JSON:\n"
         "{\"breaking_alert\":\"\","
-        "\"world\":[{\"headline\":\"\",\"summary\":\"\",\"source\":\"\",\"url\":\"\",\"severity\":\"\"}],"
+        "\"world\":[{\"headline\":\"\",\"rss_summary\":\"\",\"source\":\"\",\"url\":\"\",\"severity\":\"\"}],"
         "\"national\":[...],"
         "\"finance\":[...],"
         "\"cyber\":[...]}"
@@ -267,57 +371,103 @@ def classify_and_select(client, rss_data):
     ))
     parts = [b.text for b in response.content if hasattr(b, "text") and b.text]
     text  = "".join(parts)
-    print("  [LLM] classify response: {} chars, stop={}".format(
-        len(text), response.stop_reason))
+    print("  [LLM-1] classify: {} chars, stop={}".format(len(text), response.stop_reason))
     return extract_json(text)
 
-# ── MARKET DATA (Yahoo Finance RSS) ──────────────────────────────────────────
-MARKET_RSS = {
-    "dow":     "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^DJI&region=US&lang=en-US",
-    "sp500":   "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^GSPC&region=US&lang=en-US",
-    "nasdaq":  "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^IXIC&region=US&lang=en-US",
-}
+# ── LLM SUMMARIZE ─────────────────────────────────────────────────────────────
+def summarize_stories(client, all_sections):
+    """
+    Call 2 of 2: Given selected stories with article text (or RSS fallback),
+    produce a clean 2-sentence summary for each. Single batched Haiku call.
+    """
+    # Build input: for each story, use article_text if available, else rss_summary
+    stories_input = ""
+    idx = 0
+    for section in ("world", "national", "finance", "cyber"):
+        for s in all_sections.get(section, []):
+            idx += 1
+            body = s.get("article_text") or s.get("rss_summary") or s.get("summary") or ""
+            stories_input += "\n[{}] {} | {}\nTEXT: {}\n".format(
+                idx,
+                s.get("headline",""),
+                s.get("source",""),
+                body[:800]
+            )
 
-def fetch_market_snapshot():
-    """
-    Pull market headlines from Yahoo Finance RSS.
-    These don't carry price data directly, so we return a placeholder
-    structure -- the LLM classify step will fill in values from the
-    finance section headlines it selects.
-    Returns an empty dict; build_html handles missing values gracefully.
-    """
-    return {}
+    prompt = (
+        "Write a 2-sentence factual summary for each numbered news story below. "
+        "Be concise and neutral. Output ONLY a JSON object mapping the story number "
+        "(as string) to its summary. No markdown, no explanation.\n\n"
+        "STORIES:\n" + stories_input + "\n\n"
+        "JSON: {\"1\":\"summary...\",\"2\":\"summary...\", ...}"
+    )
+
+    response = with_retry(lambda: client.messages.create(
+        model=MODEL_RESEARCH,
+        max_tokens=2000,
+        messages=[{"role": "user", "content": prompt}]
+    ))
+    parts = [b.text for b in response.content if hasattr(b, "text") and b.text]
+    text  = "".join(parts)
+    print("  [LLM-2] summarize: {} chars, stop={}".format(len(text), response.stop_reason))
+    try:
+        return extract_json(text)
+    except Exception:
+        return {}
 
 # ── MAIN RESEARCH ORCHESTRATOR ────────────────────────────────────────────────
 def research_news(client, date_str):
     print("[1/2] Researching {}...".format(date_str))
 
-    # Free data -- no LLM tokens
+    # Step 1: free data fetches
     print("  Fetching RSS feeds...")
     rss_data = fetch_all_rss()
 
     print("  Fetching NWS weather...")
-    weather  = fetch_nws_weather()
+    weather = fetch_nws_weather()
 
-    # Single small LLM call: classify + select + summarize
-    print("  [LLM] Classifying stories (1 Haiku call, no web search)...")
+    # Step 2: LLM call 1 -- select + classify
+    print("  [LLM-1] Selecting and classifying stories...")
     classified = classify_and_select(client, rss_data)
+
+    all_sections = {
+        "world":    [x for x in classified.get("world",    []) if x and isinstance(x, dict)],
+        "national": [x for x in classified.get("national", []) if x and isinstance(x, dict)],
+        "finance":  [x for x in classified.get("finance",  []) if x and isinstance(x, dict)],
+        "cyber":    [x for x in classified.get("cyber",    []) if x and isinstance(x, dict)],
+    }
+
+    # Step 3: fetch article bodies (free, silent fallback on failure)
+    print("  Fetching article text...")
+    all_stories = []
+    for section in ("world", "national", "finance", "cyber"):
+        all_stories.extend(all_sections[section])
+    enrich_with_articles(all_stories)
+    fetched = sum(1 for s in all_stories if s.get("article_text"))
+    print("  {} / {} articles fetched successfully".format(fetched, len(all_stories)))
+
+    # Step 4: LLM call 2 -- summarize with article text
+    print("  [LLM-2] Writing summaries...")
+    summaries = summarize_stories(client, all_sections)
+
+    # Inject summaries back into stories
+    idx = 0
+    for section in ("world", "national", "finance", "cyber"):
+        for s in all_sections[section]:
+            idx += 1
+            s["summary"] = summaries.get(str(idx), s.get("rss_summary", ""))
 
     merged = {
         "date_display":    date_str,
         "market_snapshot": classified.get("market_snapshot", {}),
         "weather":         weather,
         "breaking_alert":  classified.get("breaking_alert", ""),
-        "sections": {
-            "world":    [x for x in classified.get("world",    []) if x and isinstance(x, dict)],
-            "national": [x for x in classified.get("national", []) if x and isinstance(x, dict)],
-            "finance":  [x for x in classified.get("finance",  []) if x and isinstance(x, dict)],
-            "cyber":    [x for x in classified.get("cyber",    []) if x and isinstance(x, dict)],
-        }
+        "sections":        all_sections,
     }
     total = sum(len(v) for v in merged["sections"].values())
-    print("[1/2] Done. {} stories.".format(total))
+    print("[1/2] Done. {} stories ({} with full article text).".format(total, fetched))
     return merged
+
 
 
 # HTML renderer constants
