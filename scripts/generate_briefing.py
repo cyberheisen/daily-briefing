@@ -74,84 +74,102 @@ def with_retry(fn, max_retries=4, base_delay=65):
             else:
                 raise
 
-# Agentic loop for multi-turn tool use
-def run_with_tools(client, prompt, tools, max_tokens=2500, max_turns=10):
-    messages = [{"role": "user", "content": prompt}]
-    for turn in range(max_turns):
-        response = with_retry(lambda: client.messages.create(
-            model=MODEL_RESEARCH,
-            max_tokens=max_tokens,
-            tools=tools,
-            messages=messages
-        ))
-        text_parts = [b.text for b in response.content if b.type == "text"]
+# Step 1: search only -- let the model gather data freely
+def run_search(client, search_prompt, max_tokens=2000):
+    """Run web search and return raw text of all findings."""
+    response = with_retry(lambda: client.messages.create(
+        model=MODEL_RESEARCH,
+        max_tokens=max_tokens,
+        tools=[{"type": "web_search_20250305", "name": "web_search"}],
+        messages=[{"role": "user", "content": search_prompt}]
+    ))
+    # Collect all text blocks -- may be interspersed with tool blocks
+    all_text = []
+    for block in response.content:
+        if hasattr(block, "text") and block.text:
+            all_text.append(block.text)
+        # web_search_tool_result blocks contain the search snippets
+        elif block.type == "web_search_tool_result":
+            if hasattr(block, "content") and block.content:
+                for item in block.content:
+                    if hasattr(item, "text") and item.text:
+                        all_text.append(item.text)
+    return "\n\n".join(all_text)
 
-        if response.stop_reason == "end_turn":
-            final = "".join(text_parts)
-            print("    turn {} stop=end_turn text_len={} blocks={}".format(
-                turn + 1, len(final), [b.type for b in response.content]
-            ))
-            if final.strip():
-                return final
-            raise ValueError("end_turn with no text on turn {}".format(turn+1))
-
-        if response.stop_reason == "tool_use":
-            # For Anthropic hosted tools (web_search), the tool results are
-            # returned automatically in the *same* response as tool_result
-            # blocks alongside the tool_use blocks. We just append the full
-            # assistant message and call again -- no manual tool_result needed.
-            print("    turn {} stop=tool_use blocks={}".format(
-                turn + 1,
-                [b.type for b in response.content]
-            ))
-            messages.append({"role": "assistant", "content": response.content})
-            continue
-
-        # Any other stop reason -- return text if we have it
-        final = "".join(text_parts)
-        if final.strip():
-            return final
-        raise ValueError("stop_reason={} with no text".format(response.stop_reason))
-
-    raise ValueError("Exceeded {} turns without a final response".format(max_turns))
+# Step 2: format only -- no tools, JSON output only
+def run_format(client, format_prompt, max_tokens=2500):
+    """Convert raw research text into structured JSON."""
+    response = with_retry(lambda: client.messages.create(
+        model=MODEL_RESEARCH,
+        max_tokens=max_tokens,
+        messages=[{"role": "user", "content": format_prompt}]
+    ))
+    parts = [b.text for b in response.content if hasattr(b, "text") and b.text]
+    return "".join(parts)
 
 # Research: World / National / Finance
 def research_general(client, date_str):
-    print("  [1a] Searching world, national, finance (Haiku)...")
-    prompt = (
-        "Today is {}. Search for top news.\n\n".format(date_str) +
-        "Find 3 stories each: WORLD NEWS, US NATIONAL NEWS, FINANCE & MARKETS.\n"
-        "Get current: DOW, S&P 500, NASDAQ, WTI crude, national avg gas price.\n\n"
-        "CRITICAL: Respond with RAW JSON only. No markdown. No preamble. Start with {\n\n"
-        '{"market_snapshot":{'
-        '"dow":{"value":"47,250","change":"+120 (+0.25%)","direction":"up"},'
-        '"sp500":{"value":"6,800","change":"+15 (+0.22%)","direction":"up"},'
-        '"nasdaq":{"value":"22,100","change":"+45 (+0.20%)","direction":"up"},'
-        '"wti":{"value":"$88.50","change":"-1.20 (-1.3%)","direction":"down"},'
-        '"gas_avg":{"value":"$3.89","change":"+0.05"}},'
-        '"breaking_alert":"",'
-        '"world":[{"headline":"...","summary":"...","source":"...","url":"...","severity":"normal"}],'
-        '"national":[{"headline":"...","summary":"...","source":"...","url":"...","severity":"normal"}],'
-        '"finance":[{"headline":"...","summary":"...","source":"...","url":"...","severity":"normal"}]}'
+    print("  [1a] Searching world, national, finance...")
+
+    search_prompt = (
+        "Today is {}. Search the web and find:\n".format(date_str) +
+        "- Top 3 WORLD NEWS stories (international events, wars, geopolitics)\n"
+        "- Top 3 US NATIONAL NEWS stories\n"
+        "- Top 3 FINANCE & MARKETS stories\n"
+        "- Current values: DOW, S&P 500, NASDAQ, WTI crude oil, US avg gas price\n"
+        "- Any major breaking news\n"
+        "Summarize each story in 2-3 sentences with source name and URL."
     )
-    tools = [{"type": "web_search_20250305", "name": "web_search"}]
-    return extract_json(run_with_tools(client, prompt, tools))
+    raw = run_search(client, search_prompt)
+    print("    search complete ({} chars)".format(len(raw)))
+
+    format_prompt = (
+        "Convert this news research into JSON. "
+        "Output RAW JSON only -- no markdown, no preamble. Start with {\n\n"
+        "Research data:\n" + raw[:5000] + "\n\n"
+        "Required JSON structure (fill in real values from the research):\n"
+        "{{\n"
+        '  "market_snapshot": {{\n'
+        '    "dow":     {{"value": "47,250", "change": "+120 (+0.25%)", "direction": "up"}},\n'
+        '    "sp500":   {{"value": "6,800",  "change": "+15 (+0.22%)",  "direction": "up"}},\n'
+        '    "nasdaq":  {{"value": "22,100", "change": "+45 (+0.20%)",  "direction": "up"}},\n'
+        '    "wti":     {{"value": "$88.50", "change": "-1.20",         "direction": "down"}},\n'
+        '    "gas_avg": {{"value": "$3.89",  "change": "+0.05"}}\n'
+        "  }},\n"
+        '  "breaking_alert": "",\n'
+        '  "world":    [{{"headline":"...","summary":"...","source":"...","url":"...","severity":"normal"}}],\n'
+        '  "national": [{{"headline":"...","summary":"...","source":"...","url":"...","severity":"normal"}}],\n'
+        '  "finance":  [{{"headline":"...","summary":"...","source":"...","url":"...","severity":"normal"}}]\n'
+        "}}"
+    )
+    return extract_json(run_format(client, format_prompt))
 
 # Research: Cyber + Weather
 def research_cyber_weather(client, date_str):
-    print("  [1b] Searching cybersecurity + weather (Haiku)...")
-    prompt = (
-        "Today is {}. Search for two things:\n\n".format(date_str) +
-        "1. TOP 4 CYBERSECURITY stories: threats, CVEs, CISA advisories, "
-        "nation-state, ransomware, breaches.\n"
-        "2. WEATHER Spring TX 77379: high, low, condition, rain chance, wind, NWS alerts.\n\n"
-        "CRITICAL: Respond with RAW JSON only. No markdown. No preamble. Start with {\n\n"
-        '{"weather":{"high":"84F","low":"68F","condition":"Partly Cloudy",'
-        '"rain_chance":"20%","alerts":"None","wind":"S 10 mph"},'
-        '"cyber":[{"headline":"...","summary":"...","source":"...","url":"...","severity":"critical"}]}'
+    print("  [1b] Searching cybersecurity + weather...")
+
+    search_prompt = (
+        "Today is {}. Search the web and find:\n".format(date_str) +
+        "- Top 4 CYBERSECURITY stories: active threats, CVEs, CISA advisories, "
+        "nation-state attacks, ransomware, data breaches. Include CVE IDs where relevant.\n"
+        "- WEATHER for Spring TX 77379: high temp, low temp, conditions, "
+        "rain chance %, wind, any NWS severe weather alerts.\n"
+        "Summarize each story in 2-3 sentences with source name and URL."
     )
-    tools = [{"type": "web_search_20250305", "name": "web_search"}]
-    return extract_json(run_with_tools(client, prompt, tools))
+    raw = run_search(client, search_prompt)
+    print("    search complete ({} chars)".format(len(raw)))
+
+    format_prompt = (
+        "Convert this research into JSON. "
+        "Output RAW JSON only -- no markdown, no preamble. Start with {\n\n"
+        "Research data:\n" + raw[:5000] + "\n\n"
+        "Required JSON structure:\n"
+        "{{\n"
+        '  "weather": {{"high":"84F","low":"68F","condition":"Partly Cloudy","rain_chance":"20%","alerts":"None","wind":"S 10 mph"}},\n'
+        '  "cyber": [{{"headline":"...","summary":"...","source":"...","url":"...","severity":"critical/high/watch/normal"}}]\n'
+        "}}"
+    )
+    return extract_json(run_format(client, format_prompt))
 
 # Merge research results
 def research_news(client, date_str):
