@@ -391,12 +391,13 @@ def summarize_stories(client, all_sections):
                 idx,
                 s.get("headline",""),
                 s.get("source",""),
-                body[:800]
+                body[:1500]
             )
 
     prompt = (
-        "Write a 2-sentence factual summary for each numbered news story below. "
-        "Be concise and neutral. Output ONLY a JSON object mapping the story number "
+        "Write a 3-4 sentence factual summary for each numbered news story below. "
+        "Cover the key facts, context, and significance. Be clear and neutral. "
+        "Output ONLY a JSON object mapping the story number "
         "(as string) to its summary. No markdown, no explanation.\n\n"
         "STORIES:\n" + stories_input + "\n\n"
         "JSON: {\"1\":\"summary...\",\"2\":\"summary...\", ...}"
@@ -404,7 +405,7 @@ def summarize_stories(client, all_sections):
 
     response = with_retry(lambda: client.messages.create(
         model=MODEL_RESEARCH,
-        max_tokens=2000,
+        max_tokens=3000,
         messages=[{"role": "user", "content": prompt}]
     ))
     parts = [b.text for b in response.content if hasattr(b, "text") and b.text]
