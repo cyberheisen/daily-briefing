@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Daily Briefing Generator
-Splits research into two API calls to stay under 30k token/min rate limit.
-Handles multi-turn tool use (web_search may require follow-up turns).
-Outputs to ./output/index.html and ./output/archive/YYYY-MM-DD.html
+- Haiku for all research (web search → JSON)
+- Zero LLM calls for HTML — pure Python template renderer
+- ~$0.02–0.03/day for 3 editions
 """
 
 import anthropic
@@ -13,30 +13,44 @@ import re
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from html import escape
 
-# ── Date helpers ───────────────────────────────────────────────────────────────
+# ── Models ─────────────────────────────────────────────────────────────────────
 
-def get_cst_date():
+MODEL_RESEARCH = "claude-haiku-4-5"   # Only model used — research only
+
+# ── Date / edition helpers ─────────────────────────────────────────────────────
+
+def get_cst_now():
     cst = timezone(timedelta(hours=-6))
     now = datetime.now(cst)
-    return now.strftime("%A, %B %-d, %Y"), now.strftime("%Y-%m-%d")
+    date_display = now.strftime("%A, %B %-d, %Y")
+    date_slug    = now.strftime("%Y-%m-%d")
+    time_str     = now.strftime("%I:%M %p")
+    hour         = now.hour
+    if hour < 12:
+        edition_label, edition_slug = "Morning", "morning"
+    elif hour < 18:
+        edition_label, edition_slug = "Midday",  "midday"
+    else:
+        edition_label, edition_slug = "Evening", "evening"
+    return date_display, date_slug, time_str, edition_label, edition_slug
 
 # ── JSON extraction ────────────────────────────────────────────────────────────
 
 def extract_json(text):
-    """Extract JSON from text that may have preamble or fences."""
     if not text or not text.strip():
-        raise ValueError("Empty response text — no JSON to extract")
-    match = re.search(r'```(?:json)?\s*([\s\S]*?)```', text)
-    if match:
+        raise ValueError("Empty response — no JSON to extract")
+    m = re.search(r'```(?:json)?\s*([\s\S]*?)```', text)
+    if m:
         try:
-            return json.loads(match.group(1).strip())
+            return json.loads(m.group(1).strip())
         except json.JSONDecodeError:
             pass
-    start, end = text.find('{'), text.rfind('}')
-    if start != -1 and end > start:
+    s, e = text.find('{'), text.rfind('}')
+    if s != -1 and e > s:
         try:
-            return json.loads(text[start:end+1])
+            return json.loads(text[s:e+1])
         except json.JSONDecodeError:
             pass
     return json.loads(text.strip())
@@ -63,90 +77,40 @@ def with_retry(fn, max_retries=4, base_delay=65):
             else:
                 raise
 
-# ── Agentic loop: handles multi-turn tool use ─────────────────────────────────
+# ── Agentic loop ───────────────────────────────────────────────────────────────
 
-def run_with_tools(client, prompt, tools, max_tokens=2000, max_turns=5):
-    """
-    Run a prompt that may require multiple tool-use turns.
-    Continues the conversation until the model returns stop_reason='end_turn'
-    with a text response (not just tool_use).
-    Returns the final text content.
-    """
+def run_with_tools(client, prompt, tools, max_tokens=2500, max_turns=6):
     messages = [{"role": "user", "content": prompt}]
-
     for turn in range(max_turns):
         response = with_retry(lambda: client.messages.create(
-            model="claude-sonnet-4-5",
+            model=MODEL_RESEARCH,
             max_tokens=max_tokens,
             tools=tools,
             messages=messages
         ))
-
-        # Collect any text from this response
-        text_parts = []
-        tool_use_blocks = []
-        for block in response.content:
-            if block.type == "text":
-                text_parts.append(block.text)
-            elif block.type == "tool_use":
-                tool_use_blocks.append(block)
-
-        # If the model is done (end_turn) and has text, we're done
+        text_parts = [b.text for b in response.content if b.type == "text"]
         if response.stop_reason == "end_turn":
-            final_text = "".join(text_parts)
-            if final_text.strip():
-                return final_text
-            # end_turn but no text — shouldn't happen, but handle gracefully
-            raise ValueError(f"Model returned end_turn with no text on turn {turn+1}")
-
-        # Model wants to use tools (stop_reason == "tool_use")
-        # We need to append the assistant message and provide tool results
-        if response.stop_reason == "tool_use" and tool_use_blocks:
-            # Append assistant's response to conversation
+            final = "".join(text_parts)
+            if final.strip():
+                return final
+            raise ValueError(f"end_turn with no text on turn {turn+1}")
+        if response.stop_reason == "tool_use":
             messages.append({"role": "assistant", "content": response.content})
-
-            # Build tool results — for web_search the SDK handles execution,
-            # but the tool results come back in the response content as
-            # tool_result blocks automatically when using the hosted tool.
-            # We just need to continue the loop; the next call will have the results.
-            # Actually with Anthropic's hosted web_search, results are injected
-            # automatically — we only need to pass the full message history back.
-            # The tool_result blocks are already in response.content.
-            # So just loop and call again with the updated messages.
-            
-            # Check if tool results are already in response.content
-            tool_result_blocks = [b for b in response.content if hasattr(b, 'type') and b.type == "tool_result"]
-            
-            if tool_result_blocks:
-                # Results already present — just continue loop, model will synthesize
-                messages.append({"role": "assistant", "content": response.content})
-            else:
-                # No results yet — the model issued tool_use, we need to re-invoke
-                # with the conversation so far so it can see results on next turn
-                pass  # messages already has the assistant turn appended above
-            
             continue
+        final = "".join(text_parts)
+        if final.strip():
+            return final
+        raise ValueError(f"stop_reason={response.stop_reason} with no text")
+    raise ValueError(f"Exceeded {max_turns} turns without a final response")
 
-        # Unexpected stop reason
-        final_text = "".join(text_parts)
-        if final_text.strip():
-            return final_text
-        raise ValueError(f"Unexpected stop_reason={response.stop_reason} with no text")
-
-    raise ValueError(f"Exceeded {max_turns} turns without a final text response")
-
-# ── Research: call A — World / National / Finance ─────────────────────────────
+# ── Research calls ─────────────────────────────────────────────────────────────
 
 def research_general(client, date_str):
-    print("  [1a] Searching world, national, finance...")
-
-    prompt = f"""Today is {date_str}. Search the web for today's top news.
-
-Find 3 stories each for: WORLD NEWS, US NATIONAL NEWS, FINANCE & MARKETS.
-Also get current values: DOW, S&P 500, NASDAQ, WTI crude, national avg gas price.
-
-CRITICAL: After searching, respond with RAW JSON only. No markdown. No preamble. Start with {{
-
+    print("  [1a] Searching world, national, finance (Haiku)...")
+    prompt = f"""Today is {date_str}. Search for top news.
+Find 3 stories each: WORLD NEWS, US NATIONAL NEWS, FINANCE & MARKETS.
+Get current: DOW, S&P 500, NASDAQ, WTI crude, national avg gas price.
+CRITICAL: Respond with RAW JSON only. No markdown. No preamble. Start with {{
 {{
   "market_snapshot": {{
     "dow":    {{"value": "47,250", "change": "+120 (+0.25%)", "direction": "up"}},
@@ -160,134 +124,409 @@ CRITICAL: After searching, respond with RAW JSON only. No markdown. No preamble.
   "national": [{{"headline":"...","summary":"...","source":"...","url":"...","severity":"normal"}}],
   "finance":  [{{"headline":"...","summary":"...","source":"...","url":"...","severity":"normal"}}]
 }}"""
-
     tools = [{"type": "web_search_20250305", "name": "web_search"}]
-    text = run_with_tools(client, prompt, tools, max_tokens=2500)
-    return extract_json(text)
-
-# ── Research: call B — Cyber + Weather ────────────────────────────────────────
+    return extract_json(run_with_tools(client, prompt, tools))
 
 def research_cyber_weather(client, date_str):
-    print("  [1b] Searching cybersecurity + weather...")
-
-    prompt = f"""Today is {date_str}. Search the web for two things:
-
-1. TOP 4 CYBERSECURITY stories: active threats, CVEs, CISA advisories, nation-state activity, ransomware, breaches.
-2. WEATHER for Spring TX (zip 77379): today's high, low, condition, rain chance, wind, any NWS alerts.
-
-CRITICAL: After searching, respond with RAW JSON only. No markdown. No preamble. Start with {{
-
+    print("  [1b] Searching cybersecurity + weather (Haiku)...")
+    prompt = f"""Today is {date_str}. Search for two things:
+1. TOP 4 CYBERSECURITY stories: threats, CVEs, CISA advisories, nation-state, ransomware, breaches.
+2. WEATHER Spring TX 77379: high, low, condition, rain chance, wind, NWS alerts.
+CRITICAL: Respond with RAW JSON only. No markdown. No preamble. Start with {{
 {{
-  "weather": {{
-    "high": "84°F", "low": "68°F", "condition": "Partly Cloudy",
-    "rain_chance": "20%", "alerts": "None", "wind": "S 10 mph"
-  }},
-  "cyber": [
-    {{"headline":"...","summary":"...","source":"...","url":"...","severity":"critical|high|watch|normal"}}
-  ]
+  "weather": {{"high":"84°F","low":"68°F","condition":"Partly Cloudy","rain_chance":"20%","alerts":"None","wind":"S 10 mph"}},
+  "cyber": [{{"headline":"...","summary":"...","source":"...","url":"...","severity":"critical|high|watch|normal"}}]
 }}"""
-
     tools = [{"type": "web_search_20250305", "name": "web_search"}]
-    text = run_with_tools(client, prompt, tools, max_tokens=2500)
-    return extract_json(text)
-
-# ── Merge results ──────────────────────────────────────────────────────────────
+    return extract_json(run_with_tools(client, prompt, tools))
 
 def research_news(client, date_str):
-    print(f"[1/3] Researching news for {date_str}...")
-
-    general = research_general(client, date_str)
-
-    print("  Pausing 20s between API calls...")
+    print(f"[1/2] Researching {date_str}...")
+    general  = research_general(client, date_str)
+    print("  Pausing 20s...")
     time.sleep(20)
-
     cyber_wx = research_cyber_weather(client, date_str)
-
     merged = {
-        "date_display": date_str,
+        "date_display":    date_str,
         "market_snapshot": general.get("market_snapshot", {}),
-        "weather": cyber_wx.get("weather", {}),
-        "breaking_alert": general.get("breaking_alert", ""),
+        "weather":         cyber_wx.get("weather", {}),
+        "breaking_alert":  general.get("breaking_alert", ""),
         "sections": {
-            "world":    general.get("world", []),
+            "world":    general.get("world",    []),
             "national": general.get("national", []),
-            "finance":  general.get("finance", []),
-            "cyber":    cyber_wx.get("cyber", []),
+            "finance":  general.get("finance",  []),
+            "cyber":    cyber_wx.get("cyber",   []),
         }
     }
-
     total = sum(len(v) for v in merged["sections"].values())
-    print(f"[1/3] Research complete. {total} stories.")
+    print(f"[1/2] Done. {total} stories.")
     return merged
 
-# ── Generate HTML ──────────────────────────────────────────────────────────────
+# ── HTML template renderer (zero LLM calls) ────────────────────────────────────
 
-def generate_html(client, news_data, date_display, date_slug):
-    print("[2/3] Generating HTML...")
+SEVERITY_CLASS = {
+    "critical": "badge-critical",
+    "high":     "badge-high",
+    "watch":    "badge-watch",
+    "normal":   "badge-normal",
+}
 
-    prompt = f"""Generate a complete daily intelligence briefing HTML page from this JSON:
+SECTION_META = {
+    "world":    ("🌍", "World News"),
+    "national": ("🇺🇸", "National News"),
+    "finance":  ("💰", "Finance & Markets"),
+    "cyber":    ("🔐", "Cybersecurity"),
+}
 
-{json.dumps(news_data, indent=2)}
+WEATHER_ICON = {
+    "sun": "☀️", "clear": "☀️", "cloud": "☁️", "partly": "⛅",
+    "rain": "🌧️", "storm": "⛈️", "thunder": "⛈️", "snow": "❄️",
+    "fog": "🌫️", "wind": "💨", "hot": "🌡️",
+}
 
-DESIGN:
-- Dark: bg #0d0f12, surface #13161b, border #252a33, gold #c8a96e, blue #4e9af1, red #e05555, green #4caf79
-- Fonts: IBM Plex Mono (labels), Playfair Display (headlines), IBM Plex Sans (body) via Google Fonts
-- Sticky ticker: DOW · S&P · NASDAQ · WTI · Gas
-- Red alert banner if breaking_alert non-empty
-- 2-col layout: main + 340px sidebar (weather, markets, quick links)
-- Story cards: severity badge (critical=red, high=amber, watch=blue), Playfair headline, summary, source link
-- Mobile responsive <900px · fade-in animations
+def weather_icon(condition):
+    c = condition.lower()
+    for k, v in WEATHER_ICON.items():
+        if k in c:
+            return v
+    return "🌤️"
 
-SECTIONS: 🌍 World · 🇺🇸 National · 💰 Finance · 🔐 Cybersecurity
+def direction_class(d):
+    return "up" if str(d).lower() == "up" else "down"
 
-SIDEBAR QUICK LINKS:
-BleepingComputer https://www.bleepingcomputer.com/
-The Hacker News https://thehackernews.com/
-CISA Advisories https://www.cisa.gov/news-events/cybersecurity-advisories
-Yahoo Finance https://finance.yahoo.com/
-Spring TX Weather https://www.foxweather.com/local-weather/texas/spring
-NPR https://www.npr.org/sections/news
+def direction_arrow(d):
+    return "▲" if str(d).lower() == "up" else "▼"
 
-Footer archive link → ./archive/
+def render_ticker(mkt):
+    items = [
+        ("DOW",    mkt.get("dow",    {})),
+        ("S&P",    mkt.get("sp500",  {})),
+        ("NASDAQ", mkt.get("nasdaq", {})),
+        ("WTI",    mkt.get("wti",    {})),
+        ("Gas",    mkt.get("gas_avg",{})),
+    ]
+    parts = []
+    for name, m in items:
+        val  = escape(str(m.get("value",  "—")))
+        chg  = escape(str(m.get("change", "")))
+        d    = direction_class(m.get("direction", "up"))
+        arr  = direction_arrow(m.get("direction", "up"))
+        parts.append(f"""
+      <div class="ticker-item">
+        <span class="ticker-name">{name}</span>
+        <span class="ticker-val">{val}</span>
+        <span class="ticker-chg {d}">{arr} {chg}</span>
+      </div>""")
+    return "".join(parts)
 
-Start with <!DOCTYPE html>. No markdown fences. Output HTML only."""
+def render_stories(stories):
+    out = []
+    for s in stories:
+        sev   = s.get("severity", "normal").lower()
+        cls   = SEVERITY_CLASS.get(sev, "badge-normal")
+        label = sev.capitalize()
+        hl    = escape(s.get("headline", ""))
+        summ  = escape(s.get("summary",  ""))
+        src   = escape(s.get("source",   ""))
+        url   = escape(s.get("url",      "#"))
+        out.append(f"""
+      <div class="story">
+        <div class="story-meta">
+          <span class="badge {cls}">{label}</span>
+        </div>
+        <div class="story-headline">{hl}</div>
+        <div class="story-summary">{summ}</div>
+        <a href="{url}" class="story-source" target="_blank" rel="noopener">→ {src}</a>
+      </div>""")
+    return "".join(out)
 
-    msg = with_retry(lambda: client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=8000,
-        messages=[{"role": "user", "content": prompt}]
-    ))
+def render_sections(sections):
+    out = []
+    for key in ("world", "national", "finance", "cyber"):
+        stories = sections.get(key, [])
+        icon, title = SECTION_META[key]
+        count = len(stories)
+        out.append(f"""
+    <div class="section">
+      <div class="section-header">
+        <span class="section-icon">{icon}</span>
+        <span class="section-title">{title}</span>
+        <span class="section-count">{count} {'story' if count == 1 else 'stories'}</span>
+      </div>
+      {render_stories(stories)}
+    </div>""")
+    return "".join(out)
 
-    html = "".join(getattr(b, "text", "") for b in msg.content).strip()
-    if html.startswith("```"):
-        html = re.sub(r'^```[a-z]*\n', '', html)
-        html = re.sub(r'\n```$', '', html.strip())
+def render_weather(wx):
+    high  = escape(wx.get("high",       "—"))
+    low   = escape(wx.get("low",        "—"))
+    cond  = escape(wx.get("condition",  "—"))
+    rain  = escape(wx.get("rain_chance","—"))
+    wind  = escape(wx.get("wind",       "—"))
+    alert = escape(wx.get("alerts",     "None"))
+    icon  = weather_icon(cond)
+    alert_html = ""
+    if alert and alert.lower() not in ("none", "no alerts", ""):
+        alert_html = f'<div class="weather-alert">⚠ {alert}</div>'
+    return f"""
+      <div class="weather-main">
+        <div>
+          <div class="weather-temp">{high}</div>
+          <div class="weather-condition">{cond}</div>
+        </div>
+        <div class="weather-icon">{icon}</div>
+      </div>
+      <div class="weather-row"><span class="weather-label">Low</span><span class="weather-val">{low}</span></div>
+      <div class="weather-row"><span class="weather-label">Rain</span><span class="weather-val">{rain}</span></div>
+      <div class="weather-row"><span class="weather-label">Wind</span><span class="weather-val">{wind}</span></div>
+      {alert_html}"""
 
-    print(f"[2/3] HTML generated ({len(html):,} chars).")
-    return html
+def render_markets(mkt):
+    rows = [
+        ("DOW",    mkt.get("dow",    {})),
+        ("S&P 500",mkt.get("sp500",  {})),
+        ("NASDAQ", mkt.get("nasdaq", {})),
+        ("WTI",    mkt.get("wti",    {})),
+        ("Gas Avg",mkt.get("gas_avg",{})),
+    ]
+    out = []
+    for name, m in rows:
+        val = escape(str(m.get("value",  "—")))
+        chg = escape(str(m.get("change", "")))
+        d   = direction_class(m.get("direction", "up"))
+        arr = direction_arrow(m.get("direction", "up"))
+        out.append(f"""
+      <div class="market-row">
+        <span class="market-name">{name}</span>
+        <span class="market-val">{val}</span>
+        <span class="market-chg {d}">{arr} {chg}</span>
+      </div>""")
+    return "".join(out)
+
+QUICK_LINKS = [
+    ("BleepingComputer",  "https://www.bleepingcomputer.com/"),
+    ("The Hacker News",   "https://thehackernews.com/"),
+    ("CISA Advisories",   "https://www.cisa.gov/news-events/cybersecurity-advisories"),
+    ("Yahoo Finance",     "https://finance.yahoo.com/"),
+    ("Spring TX Weather", "https://www.foxweather.com/local-weather/texas/spring"),
+    ("NPR News",          "https://www.npr.org/sections/news"),
+]
+
+def render_quick_links():
+    return "".join(
+        f'<a href="{url}" class="quick-link" target="_blank" rel="noopener">{escape(name)}</a>'
+        for name, url in QUICK_LINKS
+    )
+
+CSS = """
+  :root {
+    --bg:#0d0f12; --surface:#13161b; --surface2:#1a1e25; --border:#252a33;
+    --text:#c8cdd6; --muted:#636b78; --gold:#c8a96e; --blue:#4e9af1;
+    --red:#e05555; --amber:#e09955; --green:#4caf79; --cyan:#4ecfcf;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:'IBM Plex Sans',sans-serif;font-size:14px;line-height:1.6}
+  /* ── Ticker ── */
+  .ticker-bar{background:#080a0d;border-bottom:1px solid var(--border);overflow:hidden;position:sticky;top:0;z-index:100}
+  .ticker-inner{display:flex;align-items:center;height:38px}
+  .ticker-label{background:var(--gold);color:#000;font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:600;letter-spacing:.12em;padding:0 14px;height:100%;display:flex;align-items:center;flex-shrink:0;text-transform:uppercase}
+  .ticker-items{display:flex;gap:32px;padding:0 24px;overflow-x:auto;scrollbar-width:none}
+  .ticker-items::-webkit-scrollbar{display:none}
+  .ticker-item{display:flex;align-items:center;gap:8px;white-space:nowrap}
+  .ticker-name{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em}
+  .ticker-val{font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;color:var(--text)}
+  .ticker-chg{font-family:'IBM Plex Mono',monospace;font-size:11px}
+  .up{color:var(--green)} .down{color:var(--red)}
+  /* ── Alert ── */
+  .alert-banner{background:#1a0e0e;border-bottom:2px solid var(--red);padding:10px 24px;display:flex;align-items:center;gap:12px}
+  .alert-tag{background:var(--red);color:#fff;font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:600;letter-spacing:.15em;padding:3px 10px;border-radius:2px;flex-shrink:0}
+  .alert-text{font-size:13px;color:#f08080}
+  /* ── Header ── */
+  .main-header{padding:36px 32px 28px;border-bottom:1px solid var(--border)}
+  .header-label{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--gold);letter-spacing:.25em;text-transform:uppercase;margin-bottom:10px}
+  .header-title{font-family:'Playfair Display',serif;font-size:42px;font-weight:900;color:#fff;line-height:1.1}
+  .header-meta{display:flex;align-items:center;gap:12px;margin-top:10px;flex-wrap:wrap}
+  .header-date{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--muted);letter-spacing:.08em}
+  .edition-badge{font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:600;letter-spacing:.15em;text-transform:uppercase;padding:3px 10px;border-radius:2px}
+  .edition-morning{background:rgba(200,169,110,.15);color:var(--gold);border:1px solid rgba(200,169,110,.3)}
+  .edition-midday {background:rgba(78,154,241,.12);color:var(--blue);border:1px solid rgba(78,154,241,.25)}
+  .edition-evening{background:rgba(78,207,207,.1); color:var(--cyan);border:1px solid rgba(78,207,207,.25)}
+  /* ── Layout ── */
+  .layout{display:grid;grid-template-columns:1fr 340px;gap:0;max-width:1400px}
+  .main-col{padding:28px 32px;border-right:1px solid var(--border)}
+  .sidebar{padding:28px 24px}
+  /* ── Sections ── */
+  .section{margin-bottom:40px}
+  .section-header{display:flex;align-items:center;gap:10px;margin-bottom:18px;padding-bottom:12px;border-bottom:1px solid var(--border)}
+  .section-icon{font-size:18px}
+  .section-title{font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;letter-spacing:.2em;text-transform:uppercase;color:var(--gold)}
+  .section-count{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--muted);margin-left:auto}
+  /* ── Story cards ── */
+  .story{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:16px 18px;margin-bottom:12px;animation:fadeIn .4s ease;transition:border-color .2s}
+  .story:hover{border-color:#3a4050}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  .story-meta{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+  .badge{font-family:'IBM Plex Mono',monospace;font-size:9px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;padding:2px 8px;border-radius:2px}
+  .badge-critical{background:rgba(224,85,85,.18);color:var(--red);border:1px solid rgba(224,85,85,.35)}
+  .badge-high{background:rgba(224,153,85,.15);color:var(--amber);border:1px solid rgba(224,153,85,.3)}
+  .badge-watch{background:rgba(78,154,241,.12);color:var(--blue);border:1px solid rgba(78,154,241,.25)}
+  .badge-normal{background:rgba(100,110,125,.12);color:var(--muted);border:1px solid var(--border)}
+  .story-headline{font-family:'Playfair Display',serif;font-size:17px;font-weight:700;color:#e8ecf2;line-height:1.3;margin-bottom:8px}
+  .story-summary{font-size:13px;color:var(--text);line-height:1.65}
+  .story-source{display:inline-block;margin-top:10px;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--blue);text-decoration:none;letter-spacing:.05em}
+  .story-source:hover{color:var(--gold)}
+  /* ── Sidebar ── */
+  .sidebar-card{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:16px;margin-bottom:20px}
+  .sidebar-card-title{font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:600;letter-spacing:.2em;text-transform:uppercase;color:var(--gold);margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  /* ── Weather ── */
+  .weather-main{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px}
+  .weather-temp{font-family:'Playfair Display',serif;font-size:48px;font-weight:700;color:#fff;line-height:1}
+  .weather-condition{font-size:13px;color:var(--muted);margin-top:4px}
+  .weather-icon{font-size:40px}
+  .weather-row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px}
+  .weather-row:last-of-type{border-bottom:none}
+  .weather-label{color:var(--muted);font-family:'IBM Plex Mono',monospace;font-size:10px}
+  .weather-val{color:var(--text);font-family:'IBM Plex Mono',monospace;font-size:11px}
+  .weather-alert{background:rgba(224,153,85,.12);border:1px solid rgba(224,153,85,.3);border-radius:4px;padding:8px 10px;margin-top:10px;font-size:11px;color:#f0c070}
+  /* ── Markets ── */
+  .market-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)}
+  .market-row:last-child{border-bottom:none}
+  .market-name{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--muted)}
+  .market-val{font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600}
+  .market-chg{font-family:'IBM Plex Mono',monospace;font-size:10px}
+  /* ── Quick links ── */
+  .quick-link{display:block;padding:8px 0;border-bottom:1px solid var(--border);font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--blue);text-decoration:none;transition:color .15s}
+  .quick-link:last-child{border-bottom:none}
+  .quick-link:hover{color:var(--gold)}
+  /* ── Footer ── */
+  footer{padding:24px 32px;border-top:1px solid var(--border);font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--muted);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
+  .archive-link{color:var(--blue);text-decoration:none}
+  .archive-link:hover{color:var(--gold)}
+  /* ── Mobile ── */
+  @media(max-width:900px){
+    .layout{grid-template-columns:1fr}
+    .main-col{border-right:none;padding:20px 16px}
+    .sidebar{padding:20px 16px;border-top:1px solid var(--border)}
+    .header-title{font-size:28px}
+    .main-header{padding:24px 16px}
+    footer{padding:16px}
+  }
+"""
+
+FINNHUB_JS = """
+<script>
+(function() {
+  const KEY = window.__FINNHUB_KEY__;
+  if (!KEY) return;
+
+  // Symbols to fetch: [finnhub_symbol, display_name, element_id_prefix]
+  const SYMBOLS = [
+    ["DJI",   "DOW",    "mkt-dow"],
+    ["SPX",   "S&P",    "mkt-sp500"],
+    ["COMP",  "NASDAQ", "mkt-nasdaq"],
+    ["USOIL", "WTI",    "mkt-wti"],
+  ];
+
+  function colorClass(chg) { return chg >= 0 ? "up" : "down"; }
+  function arrow(chg)      { return chg >= 0 ? "
+    mkt      = data.get("market_snapshot", {})
+    wx       = data.get("weather", {})
+    sections = data.get("sections", {})
+    alert    = data.get("breaking_alert", "")
+
+    alert_html = ""
+    if alert and alert.strip():
+        alert_html = f"""
+<div class="alert-banner">
+  <span class="alert-tag">⚡ Breaking</span>
+  <span class="alert-text">{escape(alert)}</span>
+</div>"""
+
+    ed_cls = f"edition-{edition_slug}"
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Daily Briefing — {escape(date_display)} — {edition_label}</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>{CSS}</style>
+</head>
+<body>
+
+<div class="ticker-bar">
+  <div class="ticker-inner">
+    <div class="ticker-label">Markets</div>
+    <div class="ticker-items">{render_ticker(mkt)}</div>
+  </div>
+</div>
+{alert_html}
+<div class="main-header">
+  <div class="header-label">// Daily Intelligence Briefing</div>
+  <div class="header-title">{escape(date_display)}</div>
+  <div class="header-meta">
+    <span class="header-date">Spring, TX &nbsp;|&nbsp; {escape(time_str)} CDT</span>
+    <span class="edition-badge {ed_cls}">{edition_label} Edition</span>
+  </div>
+</div>
+
+<div class="layout">
+  <div class="main-col">
+    {render_sections(sections)}
+  </div>
+  <div class="sidebar">
+    <div class="sidebar-card">
+      <div class="sidebar-card-title">// Weather · Spring TX</div>
+      {render_weather(wx)}
+    </div>
+    <div class="sidebar-card">
+      <div class="sidebar-card-title">// Markets</div>
+      {render_markets(mkt)}
+    </div>
+    <div class="sidebar-card">
+      <div class="sidebar-card-title">// Quick Links</div>
+      {render_quick_links()}
+    </div>
+  </div>
+</div>
+
+<footer>
+  <span>Generated {escape(date_display)} at {escape(time_str)} CDT</span>
+  <a href="./archive/" class="archive-link">← Previous briefings</a>
+</footer>
+
+</body>
+</html>"""
 
 # ── Save output ────────────────────────────────────────────────────────────────
 
-def save_output(html, date_slug):
-    print("[3/3] Saving...")
+def save_output(html, date_slug, edition_slug):
+    print("[3/3] Saving...")  # step label kept consistent even though step 2 is now free
     out = Path("output")
     arc = out / "archive"
     out.mkdir(exist_ok=True)
     arc.mkdir(exist_ok=True)
     (out / "index.html").write_text(html, encoding="utf-8")
-    (arc / f"{date_slug}.html").write_text(html, encoding="utf-8")
+    (out / f"{edition_slug}.html").write_text(html, encoding="utf-8")
+    archive_name = f"{date_slug}-{edition_slug}.html"
+    (arc / archive_name).write_text(html, encoding="utf-8")
     write_archive_index(arc)
-    print(f"[3/3] Saved output/index.html + output/archive/{date_slug}.html")
+    print(f"[3/3] Saved output/index.html + output/{edition_slug}.html + output/archive/{archive_name}")
 
 def write_archive_index(arc):
-    files = sorted(arc.glob("????-??-??.html"), reverse=True)
+    files = sorted(arc.glob("????-??-??-*.html"), reverse=True)
     items = ""
     for f in files:
+        parts = f.stem.rsplit('-', 1)
+        date_part    = parts[0] if len(parts) == 2 else f.stem
+        edition_part = parts[1].capitalize() if len(parts) == 2 else ""
         try:
-            label = datetime.strptime(f.stem, "%Y-%m-%d").strftime("%A, %B %-d, %Y")
+            label = datetime.strptime(date_part, "%Y-%m-%d").strftime("%A, %B %-d, %Y")
         except ValueError:
-            label = f.stem
-        items += f'<li><a href="{f.name}">{label}</a></li>\n'
+            label = date_part
+        display = f"{label} — {edition_part}" if edition_part else label
+        items += f'<li><a href="{f.name}">{display}</a></li>\n'
 
     (arc / "index.html").write_text(f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
@@ -314,16 +553,22 @@ def main():
         raise ValueError("ANTHROPIC_API_KEY not set")
 
     client = anthropic.Anthropic(api_key=api_key)
-    date_display, date_slug = get_cst_date()
+    date_display, date_slug, time_str, edition_label, edition_slug = get_cst_now()
 
     print("=== Daily Briefing Generator ===")
-    print(f"Date: {date_display}\n")
+    print(f"Date:    {date_display}")
+    print(f"Time:    {time_str}")
+    print(f"Edition: {edition_label}")
+    print(f"Model:   {MODEL_RESEARCH} (research only — HTML is templated)\n")
 
-    news_data = research_news(client, date_display)
-    html      = generate_html(client, news_data, date_display, date_slug)
-    save_output(html, date_slug)
+    data = research_news(client, date_display)
 
-    print(f"\n✅ Done: {date_display}")
+    print("[2/2] Rendering HTML from template...")
+    html = build_html(data, date_display, time_str, edition_label, edition_slug)
+    print(f"[2/2] HTML rendered ({len(html):,} chars) — no LLM call.")
+
+    save_output(html, date_slug, edition_slug)
+    print(f"\n✅ {edition_label} Edition — {date_display}")
 
 if __name__ == "__main__":
     main()
