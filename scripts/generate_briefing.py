@@ -159,10 +159,10 @@ def research_news(client, date_str):
         "weather":         data.get("weather", {}),
         "breaking_alert":  data.get("breaking_alert", ""),
         "sections": {
-            "world":    data.get("world",    []),
-            "national": data.get("national", []),
-            "finance":  data.get("finance",  []),
-            "cyber":    data.get("cyber",    []),
+            "world":    [x for x in data.get("world",    []) if x and isinstance(x, dict)],
+            "national": [x for x in data.get("national", []) if x and isinstance(x, dict)],
+            "finance":  [x for x in data.get("finance",  []) if x and isinstance(x, dict)],
+            "cyber":    [x for x in data.get("cyber",    []) if x and isinstance(x, dict)],
         }
     }
     total = sum(len(v) for v in merged["sections"].values())
@@ -234,7 +234,7 @@ def render_ticker(mkt):
 
 def render_stories(stories):
     out = []
-    for s in stories:
+    for s in [x for x in (stories or []) if x and isinstance(x, dict)]:
         sev   = s.get("severity", "normal").lower()
         cls   = SEVERITY_CLASS.get(sev, "badge-normal")
         label = sev.capitalize()
