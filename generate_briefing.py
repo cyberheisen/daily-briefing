@@ -8,6 +8,7 @@ Outputs to ./output/index.html and ./output/archive/YYYY-MM-DD.html
 import anthropic
 import os
 import json
+import re
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -15,13 +16,6 @@ from pathlib import Path
 
 LOCATION = "Spring, Texas"
 TIMEZONE_NAME = "CST/CDT"
-OWNER_CONTEXT = """
-The reader is a senior penetration tester with 25+ years in cybersecurity, 
-who also co-owns a high-end architectural design firm in Spring, TX.
-Prioritize: cyber/infosec news, national security, financial markets, 
-local Houston/Spring TX weather, and top world/national headlines.
-Be direct, technical where appropriate, and don't over-explain basics.
-"""
 
 # ── Date helpers ───────────────────────────────────────────────────────────────
 
@@ -30,6 +24,35 @@ def get_cst_date():
     cst = timezone(timedelta(hours=-6))
     now = datetime.now(cst)
     return now.strftime("%A, %B %-d, %Y"), now.strftime("%Y-%m-%d")
+
+# ── JSON extraction ────────────────────────────────────────────────────────────
+
+def extract_json(text):
+    """
+    Robustly extract JSON from a response that may contain preamble,
+    markdown code fences, or trailing commentary.
+    """
+    # 1. Try to extract from ```json ... ``` block
+    match = re.search(r'```(?:json)?\s*([\s\S]*?)```', text)
+    if match:
+        candidate = match.group(1).strip()
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    # 2. Try to find the outermost { } braces
+    start = text.find('{')
+    end = text.rfind('}')
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start:end+1]
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Last resort: parse the whole stripped string
+    return json.loads(text.strip())
 
 # ── Claude API calls ───────────────────────────────────────────────────────────
 
@@ -60,7 +83,12 @@ For each story provide:
 Be specific with numbers, names, and facts. For cyber, include CVE numbers 
 where relevant. For weather, include actual temps and precip %.
 
-Format your response as JSON with this structure:
+CRITICAL INSTRUCTIONS FOR YOUR RESPONSE:
+- Your response MUST start with the character {{ and end with the character }}
+- Output RAW JSON only — no preamble, no explanation, no markdown, no code fences
+- Do not write anything before the opening brace or after the closing brace
+
+Use this exact JSON structure:
 {{
   "date_display": "{date_str}",
   "market_snapshot": {{
@@ -83,13 +111,11 @@ Format your response as JSON with this structure:
     "world": [
       {{"headline": "...", "summary": "...", "source": "...", "url": "...", "severity": "critical|high|watch|normal"}}
     ],
-    "national": [...],
-    "finance": [...],
-    "cyber": [...]
+    "national": [],
+    "finance": [],
+    "cyber": []
   }}
 }}
-
-Return ONLY valid JSON, no markdown fences, no preamble.
 """
 
     message = client.messages.create(
@@ -105,20 +131,15 @@ Return ONLY valid JSON, no markdown fences, no preamble.
         if block.type == "text":
             response_text += block.text
     
-    # Parse JSON
+    # Parse JSON robustly
     try:
-        # Strip any accidental markdown fences
-        clean = response_text.strip()
-        if clean.startswith("```"):
-            clean = clean.split("```")[1]
-            if clean.startswith("json"):
-                clean = clean[4:]
-        data = json.loads(clean.strip())
-        print(f"[1/3] Research complete. {sum(len(v) for v in data['sections'].values())} stories gathered.")
+        data = extract_json(response_text)
+        story_count = sum(len(v) for v in data['sections'].values())
+        print(f"[1/3] Research complete. {story_count} stories gathered.")
         return data
-    except json.JSONDecodeError as e:
+    except (json.JSONDecodeError, KeyError) as e:
         print(f"[1/3] JSON parse error: {e}")
-        print(f"Raw response: {response_text[:500]}")
+        print(f"Raw response (first 500 chars): {response_text[:500]}")
         raise
 
 def generate_html(client, news_data, date_display, date_slug):
@@ -165,7 +186,8 @@ QUICK LINKS in sidebar (always include these):
 
 Also add a small archive link at the bottom: "← Previous briefings" linking to ./archive/
 
-Output ONLY the complete HTML. No explanation. No markdown fences. Start with <!DOCTYPE html>.
+CRITICAL: Output ONLY the complete HTML. No explanation. No markdown fences.
+Your response MUST start with <!DOCTYPE html> and nothing else before it.
 """
 
     message = client.messages.create(
@@ -182,8 +204,8 @@ Output ONLY the complete HTML. No explanation. No markdown fences. Start with <!
     # Clean up any accidental fences
     html = html.strip()
     if html.startswith("```"):
-        lines = html.split("\n")
-        html = "\n".join(lines[1:-1]) if lines[-1] == "```" else "\n".join(lines[1:])
+        html = re.sub(r'^```[a-z]*\n', '', html)
+        html = re.sub(r'\n```$', '', html.strip())
     
     print(f"[2/3] HTML generated ({len(html):,} chars).")
     return html
